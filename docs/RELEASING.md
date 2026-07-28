@@ -7,8 +7,9 @@ There are exactly two publication paths:
 2. every advertised release, beginning with `0.1.0`, through the
    environment-protected GitHub OIDC workflow.
 
-The bootstrap tooling never invokes `npm publish`. The OIDC workflow and
-`release:publish` continue to reject `0.0.0`.
+The bootstrap tooling never invokes `npm publish`. Every normal release
+command, prepared manifest check, and OIDC workflow stage rejects the entire
+`0.0.x` range and requires `0.1.0` or later.
 
 ## Common source requirements
 
@@ -35,7 +36,7 @@ to this repository, GitHub, an environment variable, or a shell history.
 After the bootstrap change is merged, create and push protected signed
 annotated tag `v0.0.0` at that exact `origin/main` commit. Do not create a
 GitHub release for this tag: a release event would invoke the OIDC workflow,
-which intentionally rejects `0.0.0`.
+which intentionally rejects every `0.0.x` version.
 
 Check out the exact tag, fetch protected main, install the reviewed npm, and
 prepare an empty output directory. Export the same reviewed allowed-signers
@@ -147,6 +148,10 @@ tag at the exact `origin/main` commit, then run:
 ```sh
 gh release create vX.Y.Z --verify-tag
 ```
+
+The workflow runs `release:check` before preparation, and the packer, prepared
+manifest verifier, registry decision, and minimal publisher independently
+enforce the same `>=0.1.0` boundary.
 
 The preparation job has no OIDC authority. It verifies the signer, tag,
 release-event commit, main ancestry, complete gate, package inventory,

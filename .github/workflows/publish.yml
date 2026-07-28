@@ -62,6 +62,9 @@ jobs:
       - name: Run the complete gate
         run: npm run format:check && npm run check && npm test
 
+      - name: Require an advertised release version
+        run: npm run release:check
+
       - name: Prepare and verify the release tarball
         run: npm run release:pack -- -- --require-clean --require-main-ancestor --require-release-tag --expected-release-commit "${RELEASE_COMMIT}" --output .release
 

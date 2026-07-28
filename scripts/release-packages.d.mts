@@ -18,6 +18,7 @@ export const RELEASE_PACKAGES: readonly {
   readonly name: string;
 }[];
 export const PACKAGE_FILES: readonly string[];
+export function isNormalReleaseVersion(version: unknown): boolean;
 export function publicRegistryArguments(
   arguments_: readonly string[],
   registry?: string,

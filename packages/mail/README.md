@@ -84,6 +84,6 @@ webhook receipt store, inbound mail, bulk mail, or deliverability abstraction.
 ## Distribution
 
 Version `0.0.0` exists only for the one-time, manual npm package-name
-bootstrap. It is packed and integrity-verified by a separate mode and is never
-published by the OIDC workflow. The first advertised supported release is
-`0.1.0`; see the repository release procedure.
+bootstrap. It is packed and integrity-verified by a separate mode. Every
+`0.0.x` version is rejected by the normal OIDC lane; the first advertised
+supported release is `0.1.0`. See the repository release procedure.

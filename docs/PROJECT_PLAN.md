@@ -68,8 +68,8 @@ Support Desk.
 - The package has local README/LICENSE, prepack build, test exclusion, exact
   release inventory, pack/import smoke verification, exact-integrity registry
   decisions, Node 22/24 CI, and a minimal OIDC publisher. Version `0.0.0` is
-  rejected by OIDC and accepted only by a separate manual bootstrap mode that
-  never publishes automatically.
+  accepted only by a separate manual bootstrap mode that never publishes
+  automatically; every `0.0.x` version is rejected by the normal OIDC lane.
 
 ## Next phases
 

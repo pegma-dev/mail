@@ -11,11 +11,14 @@ import {
   checkBootstrapRegistry,
   checkRegistry,
   decidePublication,
+  isNormalReleaseVersion,
   parseArguments,
   prepareBootstrap,
   prepareRelease,
   publicRegistryArguments,
+  publishPreparedRelease,
   validateBootstrapTag,
+  validateReleaseTag,
   validateRepository,
   verifyPreparedBootstrapManifest,
   verifyPreparedManifest,
@@ -71,6 +74,40 @@ function cleanNpmEnvironment() {
       );
     }),
   );
+}
+
+async function writePreparedReleaseFixture(directory: string, version: string) {
+  const tarball = `pegma-mail-${version}.tgz`;
+  const tarballBytes = Buffer.from("prepared release fixture\n");
+  await writeFile(join(directory, tarball), tarballBytes);
+  const commit = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
+  if (commit.status !== 0) {
+    throw new Error(`could not resolve fixture commit: ${commit.stderr}`);
+  }
+  const manifestPath = join(directory, "package-manifest.json");
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      mode: "release",
+      gitCommit: commit.stdout.trim(),
+      releaseTag: `v${version}`,
+      package: {
+        name: "@pegma/mail",
+        version,
+        tarball,
+        integrity: `sha512-${createHash("sha512")
+          .update(tarballBytes)
+          .digest("base64")}`,
+        shasum: createHash("sha1").update(tarballBytes).digest("hex"),
+        files: PACKAGE_FILES.map((path) => ({ path, size: 1 })),
+      },
+    }),
+  );
+  return manifestPath;
 }
 
 function packDependencyFixture(
@@ -270,20 +307,116 @@ describe("release package metadata", () => {
     await expect(validateRepository()).resolves.toBeDefined();
   });
 
-  it("rejects the 0.0.0 bootstrap version from a release path", async () => {
+  it.each([
+    ["0.0.0", false],
+    ["0.0.1", false],
+    ["0.0.999", false],
+    ["0.1.0", true],
+  ])("classifies the normal release boundary at %s", (version, expected) => {
+    expect(isNormalReleaseVersion(version)).toBe(expected);
+  });
+
+  it.each(["0.0.0", "0.0.1", "0.0.999"])(
+    "rejects v%s before normal release tag verification",
+    (version) => {
+      expect(() =>
+        validateReleaseTag({
+          releaseTag: `v${version}`,
+          expectedReleaseCommit: "0".repeat(40),
+        }),
+      ).toThrow("require version 0.1.0 or later");
+    },
+  );
+
+  it("rejects every 0.0.x version from normal release paths", async () => {
     await expect(
       validateRepository({
         releaseTag: "v0.0.0",
         requireReleaseTag: true,
         expectedReleaseCommit: "0".repeat(40),
       }),
-    ).rejects.toThrow("cannot use OIDC release publishing");
+    ).rejects.toThrow("require version 0.1.0 or later");
     await expect(prepareRelease()).rejects.toThrow(
-      "use explicit bootstrap:pack mode",
+      "require version 0.1.0 or later",
     );
     await expect(checkRegistry()).rejects.toThrow(
-      "use explicit bootstrap:registry mode",
+      "require version 0.1.0 or later",
     );
+    const cli = spawnSync(
+      process.execPath,
+      [join(process.cwd(), "scripts", "release-packages.mjs"), "check"],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    expect(cli.status).not.toBe(0);
+    expect(cli.stderr).toContain("require version 0.1.0 or later");
+  });
+
+  it.each(["0.0.0", "0.0.1", "0.0.999"])(
+    "rejects a self-consistent release manifest tampered to %s",
+    async (version) => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "pegma-mail-release-version-test-"),
+      );
+      try {
+        const path = await writePreparedReleaseFixture(directory, version);
+        await expect(verifyPreparedManifest(path)).rejects.toThrow(
+          "prepared package manifest is invalid",
+        );
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("accepts 0.1.0 at the prepared release manifest boundary", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-release-version-test-"),
+    );
+    try {
+      const path = await writePreparedReleaseFixture(directory, "0.1.0");
+      await expect(verifyPreparedManifest(path)).resolves.toMatchObject({
+        mode: "release",
+        releaseTag: "v0.1.0",
+        package: { name: "@pegma/mail", version: "0.1.0" },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects 0.0.x manifest tampering in the publisher before registry access", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-publish-version-test-"),
+    );
+    const originalActions = process.env["GITHUB_ACTIONS"];
+    const originalEvent = process.env["GITHUB_EVENT_NAME"];
+    const originalNpmExecPath = process.env["npm_execpath"];
+    try {
+      const path = await writePreparedReleaseFixture(directory, "0.0.999");
+      process.env["GITHUB_ACTIONS"] = "true";
+      process.env["GITHUB_EVENT_NAME"] = "release";
+      process.env["npm_execpath"] = reviewedNpmExecPath();
+      await expect(publishPreparedRelease({ manifest: path })).rejects.toThrow(
+        "prepared package manifest is invalid",
+      );
+    } finally {
+      if (originalActions === undefined) {
+        delete process.env["GITHUB_ACTIONS"];
+      } else {
+        process.env["GITHUB_ACTIONS"] = originalActions;
+      }
+      if (originalEvent === undefined) {
+        delete process.env["GITHUB_EVENT_NAME"];
+      } else {
+        process.env["GITHUB_EVENT_NAME"] = originalEvent;
+      }
+      if (originalNpmExecPath === undefined) {
+        delete process.env["npm_execpath"];
+      } else {
+        process.env["npm_execpath"] = originalNpmExecPath;
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("requires the exact bootstrap source tag in strict mode", () => {
@@ -614,6 +747,7 @@ describe("release package metadata", () => {
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
+    expect(prepare).toContain("npm run release:check");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).not.toContain("NODE_AUTH_TOKEN");
     expect(workflow).not.toContain("bootstrap:");

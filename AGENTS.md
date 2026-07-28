@@ -62,9 +62,10 @@ Work on a `claude/*` branch and open a pull request. The gate is
 
 Stable publishing is trusted-publisher OIDC only. The sole exception is the
 first package-name bootstrap: `0.0.0` may be packed and verified only through
-the explicit manual bootstrap mode documented in `docs/RELEASING.md`. OIDC
-continues to reject it. Every source tag is protected, signed, annotated, and
-already on `origin/main`; never tag, publish, or move dist-tags casually.
+the explicit manual bootstrap mode documented in `docs/RELEASING.md`. Every
+normal release path rejects the entire `0.0.x` range and starts at `0.1.0`.
+Every source tag is protected, signed, annotated, and already on `origin/main`;
+never tag, publish, or move dist-tags casually.
 
 ## Reference points
 

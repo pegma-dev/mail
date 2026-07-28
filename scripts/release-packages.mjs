@@ -21,6 +21,7 @@ const PUBLIC_NPM_REGISTRY = "https://registry.npmjs.org/";
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const BOOTSTRAP_VERSION = "0.0.0";
 const BOOTSTRAP_TAG = `v${BOOTSTRAP_VERSION}`;
+const FIRST_RELEASE_VERSION = "0.1.0";
 const RELEASE_MODE = "release";
 const BOOTSTRAP_MODE = "bootstrap";
 
@@ -37,6 +38,18 @@ export const PACKAGE_FILES = [
 
 function fail(message) {
   throw new Error(message);
+}
+
+export function isNormalReleaseVersion(version) {
+  const match =
+    typeof version === "string" ? STABLE_SEMVER.exec(version) : null;
+  return match !== null && (match[1] !== "0" || match[2] !== "0");
+}
+
+function requireNormalReleaseVersion(version) {
+  if (!isNormalReleaseVersion(version)) {
+    fail(`normal releases require version ${FIRST_RELEASE_VERSION} or later`);
+  }
 }
 
 async function readJson(path) {
@@ -218,12 +231,10 @@ function validateSignedTag(options, releaseTag) {
 
 export function validateReleaseTag(options = {}) {
   const releaseTag = options.releaseTag ?? process.env.RELEASE_TAG;
-  if (releaseTag === BOOTSTRAP_TAG) {
-    fail("the bootstrap 0.0.0 version cannot use OIDC release publishing");
-  }
   if (releaseTag === undefined || !/^v\d+\.\d+\.\d+$/u.test(releaseTag)) {
     fail("a stable release tag is required");
   }
+  requireNormalReleaseVersion(releaseTag.slice(1));
   return validateSignedTag(options, releaseTag);
 }
 
@@ -367,9 +378,7 @@ export async function validateRepository(options = {}) {
     });
   }
   if (options.requireReleaseTag) {
-    if (manifest.version === BOOTSTRAP_VERSION) {
-      fail("the bootstrap 0.0.0 version cannot use OIDC release publishing");
-    }
+    requireNormalReleaseVersion(manifest.version);
     validateReleaseTag({
       root,
       releaseTag,
@@ -431,8 +440,8 @@ export async function prepareRelease(options = {}) {
   const { root, manifest, packageDirectory, releaseTag } =
     await validateRepository(options);
   const mode = options.bootstrap === true ? BOOTSTRAP_MODE : RELEASE_MODE;
-  if (mode === RELEASE_MODE && manifest.version === BOOTSTRAP_VERSION) {
-    fail("use explicit bootstrap:pack mode for @pegma/mail@0.0.0");
+  if (mode === RELEASE_MODE) {
+    requireNormalReleaseVersion(manifest.version);
   }
   const gitCommit = run(gitCommand(), ["rev-parse", "HEAD"], {
     cwd: root,
@@ -546,9 +555,7 @@ function requireTrustedPublishingNpm() {
 
 export async function checkRegistry(options = {}) {
   const { manifest } = await validateRepository(options);
-  if (manifest.version === BOOTSTRAP_VERSION) {
-    fail("use explicit bootstrap:registry mode for @pegma/mail@0.0.0");
-  }
+  requireNormalReleaseVersion(manifest.version);
   const registry = queryRegistryIntegrity(manifest.name, manifest.version);
   if (options.manifest === undefined) {
     if (registry !== null) {
@@ -589,8 +596,7 @@ async function verifyPrepared(path, mode) {
   const record = prepared.package;
   const releaseVersion =
     typeof record?.version === "string" &&
-    STABLE_SEMVER.test(record.version) &&
-    record.version !== BOOTSTRAP_VERSION;
+    isNormalReleaseVersion(record.version);
   const bootstrapVersion = record?.version === BOOTSTRAP_VERSION;
   const validTag =
     mode === RELEASE_MODE
@@ -690,6 +696,7 @@ export async function publishPreparedRelease(options = {}) {
     options.manifest ?? ".release/package-manifest.json",
   );
   const prepared = await verifyPreparedManifest(manifestPath);
+  requireNormalReleaseVersion(prepared.package.version);
   const releaseTag = options.releaseTag ?? process.env.RELEASE_TAG;
   const expectedCommit =
     options.expectedReleaseCommit ?? process.env.RELEASE_COMMIT;
@@ -767,7 +774,8 @@ async function main() {
   const [command, ...arguments_] = process.argv.slice(2);
   const options = parseArguments(arguments_);
   if (command === "check") {
-    await validateRepository(options);
+    const { manifest } = await validateRepository(options);
+    requireNormalReleaseVersion(manifest.version);
     process.stdout.write("Release metadata is valid.\n");
     return;
   }
