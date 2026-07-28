@@ -18,8 +18,20 @@ const REPOSITORY_URL = "git+https://github.com/pegma-dev/mail.git";
 const REVIEWED_NPM_VERSION = "11.18.0";
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const BOOTSTRAP_VERSION = "0.0.0";
+const BOOTSTRAP_TAG = `v${BOOTSTRAP_VERSION}`;
+const RELEASE_MODE = "release";
+const BOOTSTRAP_MODE = "bootstrap";
 
 export const RELEASE_PACKAGES = [PACKAGE];
+export const PACKAGE_FILES = [
+  "LICENSE",
+  "README.md",
+  "dist/index.d.ts",
+  "dist/index.d.ts.map",
+  "dist/index.js",
+  "dist/index.js.map",
+  "package.json",
+];
 
 function fail(message) {
   throw new Error(message);
@@ -89,17 +101,10 @@ function exportTargets(value) {
   return [];
 }
 
-export function validateReleaseTag(options = {}) {
+function validateSignedTag(options, releaseTag) {
   const root = resolve(options.root ?? rootDirectory());
-  const releaseTag = options.releaseTag ?? process.env.RELEASE_TAG;
   const expectedReleaseCommit =
     options.expectedReleaseCommit ?? process.env.RELEASE_COMMIT;
-  if (releaseTag === "v0.0.0") {
-    fail("the bootstrap 0.0.0 version can never be published");
-  }
-  if (releaseTag === undefined || !/^v\d+\.\d+\.\d+$/u.test(releaseTag)) {
-    fail("a stable release tag is required");
-  }
   if (
     expectedReleaseCommit === undefined ||
     !/^[0-9a-f]{40,64}$/u.test(expectedReleaseCommit)
@@ -148,6 +153,25 @@ export function validateReleaseTag(options = {}) {
     fail("the release tag commit must be contained in origin/main");
   }
   return { headCommit, releaseTag };
+}
+
+export function validateReleaseTag(options = {}) {
+  const releaseTag = options.releaseTag ?? process.env.RELEASE_TAG;
+  if (releaseTag === BOOTSTRAP_TAG) {
+    fail("the bootstrap 0.0.0 version cannot use OIDC release publishing");
+  }
+  if (releaseTag === undefined || !/^v\d+\.\d+\.\d+$/u.test(releaseTag)) {
+    fail("a stable release tag is required");
+  }
+  return validateSignedTag(options, releaseTag);
+}
+
+export function validateBootstrapTag(options = {}) {
+  const releaseTag = options.releaseTag ?? process.env.RELEASE_TAG;
+  if (releaseTag !== BOOTSTRAP_TAG) {
+    fail(`manual bootstrap requires the exact ${BOOTSTRAP_TAG} source tag`);
+  }
+  return validateSignedTag(options, releaseTag);
 }
 
 export async function validateRepository(options = {}) {
@@ -265,9 +289,24 @@ export async function validateRepository(options = {}) {
   if (prerelease === true || prerelease === "true") {
     fail("prereleases cannot publish packages");
   }
+  if (options.bootstrap === true && manifest.version !== BOOTSTRAP_VERSION) {
+    fail(
+      `manual bootstrap mode only accepts ${PACKAGE.name}@${BOOTSTRAP_VERSION}`,
+    );
+  }
+  if (options.requireBootstrapTag) {
+    if (options.bootstrap !== true) {
+      fail("the bootstrap source-tag check requires bootstrap mode");
+    }
+    validateBootstrapTag({
+      root,
+      releaseTag,
+      expectedReleaseCommit: options.expectedReleaseCommit,
+    });
+  }
   if (options.requireReleaseTag) {
     if (manifest.version === BOOTSTRAP_VERSION) {
-      fail("the bootstrap 0.0.0 version can never be published");
+      fail("the bootstrap 0.0.0 version cannot use OIDC release publishing");
     }
     validateReleaseTag({
       root,
@@ -279,19 +318,14 @@ export async function validateRepository(options = {}) {
 }
 
 function verifyPackedFiles(manifest, files) {
-  const paths = files.map(({ path }) => path);
-  for (const required of ["package.json", "README.md", "LICENSE"]) {
-    if (!paths.includes(required))
-      fail(`${manifest.name} is missing ${required}`);
-  }
+  const paths = files.map(({ path }) => path).sort();
   if (
-    paths.some(
-      (path) =>
-        !["package.json", "README.md", "LICENSE"].includes(path) &&
-        !path.startsWith("dist/"),
-    )
+    paths.length !== PACKAGE_FILES.length ||
+    paths.some((path, index) => path !== PACKAGE_FILES[index])
   ) {
-    fail(`${manifest.name} tarball contains an unreviewed file`);
+    fail(
+      `${manifest.name} tarball does not match the exact reviewed inventory`,
+    );
   }
   for (const target of exportTargets(manifest.exports)) {
     const path = target.replace(/^\.\//u, "");
@@ -334,6 +368,10 @@ async function smokeTestTarball(tarball, manifest) {
 export async function prepareRelease(options = {}) {
   const { root, manifest, packageDirectory, releaseTag } =
     await validateRepository(options);
+  const mode = options.bootstrap === true ? BOOTSTRAP_MODE : RELEASE_MODE;
+  if (mode === RELEASE_MODE && manifest.version === BOOTSTRAP_VERSION) {
+    fail("use explicit bootstrap:pack mode for @pegma/mail@0.0.0");
+  }
   const gitCommit = run(gitCommand(), ["rev-parse", "HEAD"], {
     cwd: root,
     capture: true,
@@ -343,6 +381,7 @@ export async function prepareRelease(options = {}) {
   if ((await readdir(output)).length !== 0) {
     fail(`release output directory must be empty: ${output}`);
   }
+  runNpm(["audit", "--omit=dev"], { cwd: root });
   runNpm(["run", "build"], { cwd: root });
   const packedResult = runNpm(
     ["pack", packageDirectory, "--json", "--pack-destination", output],
@@ -369,6 +408,7 @@ export async function prepareRelease(options = {}) {
   await smokeTestTarball(tarballPath, manifest);
   const prepared = {
     schemaVersion: 1,
+    mode,
     gitCommit,
     releaseTag: releaseTag ?? null,
     package: {
@@ -379,12 +419,20 @@ export async function prepareRelease(options = {}) {
       shasum: hashes.shasum,
       files: packed.files
         .map(({ path, size }) => ({ path, size }))
-        .sort((left, right) => left.path.localeCompare(right.path)),
+        .sort(
+          (left, right) =>
+            PACKAGE_FILES.indexOf(left.path) -
+            PACKAGE_FILES.indexOf(right.path),
+        ),
     },
   };
   const manifestPath = join(output, "package-manifest.json");
   await writeFile(manifestPath, `${JSON.stringify(prepared, null, 2)}\n`);
   return { manifestPath, manifest: prepared };
+}
+
+export async function prepareBootstrap(options = {}) {
+  return prepareRelease({ ...options, bootstrap: true });
 }
 
 function queryRegistryIntegrity(name, version) {
@@ -427,6 +475,9 @@ function requireTrustedPublishingNpm() {
 
 export async function checkRegistry(options = {}) {
   const { manifest } = await validateRepository(options);
+  if (manifest.version === BOOTSTRAP_VERSION) {
+    fail("use explicit bootstrap:registry mode for @pegma/mail@0.0.0");
+  }
   const registry = queryRegistryIntegrity(manifest.name, manifest.version);
   if (options.manifest === undefined) {
     if (registry !== null) {
@@ -436,27 +487,57 @@ export async function checkRegistry(options = {}) {
     }
     return "absent";
   }
-  const prepared = await readJson(resolve(options.manifest));
+  const prepared = await verifyPreparedManifest(resolve(options.manifest));
   return decidePublication(prepared.package.integrity, registry);
 }
 
-export async function verifyPreparedManifest(path) {
+function validPreparedFiles(files) {
+  if (!Array.isArray(files) || files.length !== PACKAGE_FILES.length) {
+    return false;
+  }
+  const paths = [];
+  for (const file of files) {
+    if (
+      file === null ||
+      typeof file !== "object" ||
+      Array.isArray(file) ||
+      typeof file.path !== "string" ||
+      !Number.isSafeInteger(file.size) ||
+      file.size < 0
+    ) {
+      return false;
+    }
+    paths.push(file.path);
+  }
+  paths.sort();
+  return paths.every((path, index) => path === PACKAGE_FILES[index]);
+}
+
+async function verifyPrepared(path, mode) {
   const prepared = await readJson(path);
   const record = prepared.package;
+  const releaseVersion =
+    typeof record?.version === "string" &&
+    STABLE_SEMVER.test(record.version) &&
+    record.version !== BOOTSTRAP_VERSION;
+  const bootstrapVersion = record?.version === BOOTSTRAP_VERSION;
+  const validTag =
+    mode === RELEASE_MODE
+      ? releaseVersion && prepared.releaseTag === `v${record.version}`
+      : bootstrapVersion &&
+        (prepared.releaseTag === null || prepared.releaseTag === BOOTSTRAP_TAG);
   if (
     prepared.schemaVersion !== 1 ||
+    prepared.mode !== mode ||
     !/^[0-9a-f]{40,64}$/u.test(prepared.gitCommit) ||
     record === null ||
     typeof record !== "object" ||
     Array.isArray(record) ||
-    prepared.releaseTag !== `v${record?.version}` ||
+    !validTag ||
     record?.name !== PACKAGE.name ||
-    typeof record.version !== "string" ||
-    !STABLE_SEMVER.test(record.version) ||
-    record.version === BOOTSTRAP_VERSION ||
     typeof record.integrity !== "string" ||
     typeof record.shasum !== "string" ||
-    !Array.isArray(record.files)
+    !validPreparedFiles(record.files)
   ) {
     fail("prepared package manifest is invalid");
   }
@@ -483,6 +564,47 @@ export async function verifyPreparedManifest(path) {
     fail("prepared tarball has changed");
   }
   return prepared;
+}
+
+export function verifyPreparedManifest(path) {
+  return verifyPrepared(path, RELEASE_MODE);
+}
+
+export function verifyPreparedBootstrapManifest(path) {
+  return verifyPrepared(path, BOOTSTRAP_MODE);
+}
+
+export async function verifyBootstrapPreparation(options = {}) {
+  const { manifest } = await validateRepository({
+    ...options,
+    bootstrap: true,
+  });
+  if (options.manifest === undefined) {
+    fail("bootstrap verification requires an exact prepared manifest");
+  }
+  const prepared = await verifyPreparedBootstrapManifest(
+    resolve(options.manifest),
+  );
+  if (
+    prepared.package.version !== manifest.version ||
+    (options.requireBootstrapTag && prepared.releaseTag !== BOOTSTRAP_TAG)
+  ) {
+    fail("prepared bootstrap manifest does not match its verified source");
+  }
+  return prepared;
+}
+
+export async function checkBootstrapRegistry(options = {}) {
+  const { manifest } = await validateRepository({
+    ...options,
+    bootstrap: true,
+  });
+  if (options.manifest === undefined) {
+    fail("bootstrap registry checks require an exact prepared manifest");
+  }
+  const prepared = await verifyBootstrapPreparation(options);
+  const registry = queryRegistryIntegrity(manifest.name, manifest.version);
+  return decidePublication(prepared.package.integrity, registry);
 }
 
 export async function publishPreparedRelease(options = {}) {
@@ -547,6 +669,10 @@ export function parseArguments(arguments_) {
       options.requireReleaseTag = true;
       continue;
     }
+    if (argument === "--require-bootstrap-tag") {
+      options.requireBootstrapTag = true;
+      continue;
+    }
     const key =
       argument === "--root"
         ? "root"
@@ -574,6 +700,21 @@ async function main() {
     process.stdout.write("Release metadata is valid.\n");
     return;
   }
+  if (command === "bootstrap-pack") {
+    const { manifestPath } = await prepareBootstrap(options);
+    process.stdout.write(`Prepared bootstrap package at ${manifestPath}.\n`);
+    return;
+  }
+  if (command === "bootstrap-verify") {
+    await verifyBootstrapPreparation(options);
+    process.stdout.write("Prepared bootstrap package is valid.\n");
+    return;
+  }
+  if (command === "bootstrap-registry") {
+    const result = await checkBootstrapRegistry(options);
+    process.stdout.write(`Bootstrap registry decision: ${result}.\n`);
+    return;
+  }
   if (command === "pack") {
     const { manifestPath } = await prepareRelease(options);
     process.stdout.write(`Prepared release package at ${manifestPath}.\n`);
@@ -588,7 +729,9 @@ async function main() {
     await publishPreparedRelease(options);
     return;
   }
-  fail("usage: release-packages.mjs <check|pack|registry|publish> [options]");
+  fail(
+    "usage: release-packages.mjs <check|pack|registry|publish|bootstrap-pack|bootstrap-verify|bootstrap-registry> [options]",
+  );
 }
 
 const isMain =

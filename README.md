@@ -9,9 +9,11 @@ beside the state change that caused the message. The worker later consumes
 host-supplied candidate hints and confirms every claim against that
 authoritative caller record.
 
-The `0.0.0` bootstrap is implemented but deliberately unpublishable. It was
-extracted from the production-shaped outbound behavior in Support Desk after
-Identity became the second concrete consumer.
+The `0.0.0` bootstrap is implemented and restricted to the one-time,
+manual-only npm package-name bootstrap procedure. The normal OIDC release
+workflow rejects it. The component was extracted from production-shaped
+outbound behavior in Support Desk after Identity became the second concrete
+consumer.
 
 ## Guarantees
 

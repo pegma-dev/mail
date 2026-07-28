@@ -60,9 +60,11 @@ TypeScript must exclude tests, and sibling dependencies are pinned exactly.
 Work on a `claude/*` branch and open a pull request. The gate is
 `npm run format:check`, `npm run check`, and `npm test` on Node 22 and 24.
 
-Publishing is trusted-publisher OIDC only. Follow `docs/RELEASING.md`: use a
-protected signed annotated version tag already on `origin/main`, then create
-the GitHub release with `--verify-tag`. The `0.0.0` bootstrap cannot publish.
+Stable publishing is trusted-publisher OIDC only. The sole exception is the
+first package-name bootstrap: `0.0.0` may be packed and verified only through
+the explicit manual bootstrap mode documented in `docs/RELEASING.md`. OIDC
+continues to reject it. Every source tag is protected, signed, annotated, and
+already on `origin/main`; never tag, publish, or move dist-tags casually.
 
 ## Reference points
 

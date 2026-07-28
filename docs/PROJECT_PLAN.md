@@ -2,8 +2,8 @@
 
 ## Status
 
-**Stage:** extraction bootstrap complete (`0.0.0`, unpublished and blocked from
-publication)
+**Stage:** extraction bootstrap complete (`0.0.0`, awaiting the explicit
+manual-only package-name bootstrap)
 
 **Trigger:** fired on 2026-07-27. Support Desk supplied a stabilized generic
 outbound state machine and Identity supplied the second real consumer:
@@ -68,7 +68,8 @@ Support Desk.
 - The package has local README/LICENSE, prepack build, test exclusion, exact
   release inventory, pack/import smoke verification, exact-integrity registry
   decisions, Node 22/24 CI, and a minimal OIDC publisher. Version `0.0.0` is
-  rejected from every release path.
+  rejected by OIDC and accepted only by a separate manual bootstrap mode that
+  never publishes automatically.
 
 ## Next phases
 
@@ -85,11 +86,12 @@ Keep ticket-specific content, Message-ID/threading, callback receipt storage,
 and provider authentication there. Run its existing mail tests as the
 migration conformance bar.
 
-### Phase 3 — first release
+### Phase 3 — package bootstrap and first advertised release
 
-After at least one consumer integration is merged, choose a non-bootstrap
-version, complete security review, configure npm trusted publishing and
-protected signed tags, and release the exact prepared tarball.
+Bootstrap the npm package name from a protected signed `v0.0.0` source tag
+using the exact manually verified tarball. Configure npm trusted publishing
+immediately afterward, then publish the reviewed `0.1.0` release through OIDC
+so `latest` advertises a supported version.
 
 ## Non-goals
 
