@@ -44,43 +44,44 @@ content used by the workflow as `RELEASE_ALLOWED_SIGNERS`:
 ```sh
 git checkout --detach refs/tags/v0.0.0
 git fetch --no-tags origin main:refs/remotes/origin/main
-npm install --global npm@11.18.0
-npm ci
+npm install --global npm@11.18.0 --registry https://registry.npmjs.org/
 export RELEASE_TAG=v0.0.0
 export RELEASE_COMMIT="$(git rev-parse HEAD)"
 test -n "${RELEASE_ALLOWED_SIGNERS}"
+test -z "${NODE_AUTH_TOKEN:-}"
+test -z "${NPM_TOKEN:-}"
+test -z "${NPM_AUTH_TOKEN:-}"
 umask 077
 allowed_signers="$(mktemp)"
 bootstrap_userconfig="$(mktemp)"
 bootstrap_globalconfig="$(mktemp)"
 trap 'rm -f "${allowed_signers}" "${bootstrap_userconfig}" "${bootstrap_globalconfig}"' EXIT
+npm_public() {
+  npm \
+    --userconfig "${bootstrap_userconfig}" \
+    --globalconfig "${bootstrap_globalconfig}" \
+    --registry https://registry.npmjs.org/ \
+    --@pegma:registry=https://registry.npmjs.org/ \
+    "$@"
+}
+test "$(npm_public config get registry)" = "https://registry.npmjs.org/"
+test "$(npm_public config get @pegma:registry)" = "https://registry.npmjs.org/"
 printf '%s\n' "${RELEASE_ALLOWED_SIGNERS}" > "${allowed_signers}"
 git config --local gpg.format ssh
 git config --local gpg.ssh.allowedSignersFile "${allowed_signers}"
-npm run format:check
-npm run check
-npm test
-npm run bootstrap:pack -- -- --require-clean --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --output .bootstrap-release
-npm run bootstrap:verify -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
-npm run bootstrap:registry -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
+npm_public ci
+npm_public run format:check
+npm_public run check
+npm_public test
+npm_public run bootstrap:pack -- -- --require-clean --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --output .bootstrap-release
+npm_public run bootstrap:verify -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
+npm_public run bootstrap:registry -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
 ```
 
 The registry decision must be `publish`. Manually publish only the exact
 verified tarball, under the non-advertised bootstrap tag:
 
 ```sh
-test -z "${NODE_AUTH_TOKEN:-}"
-test -z "${NPM_TOKEN:-}"
-test -z "${NPM_AUTH_TOKEN:-}"
-npm_public() {
-  npm "$@" \
-    --userconfig "${bootstrap_userconfig}" \
-    --globalconfig "${bootstrap_globalconfig}" \
-    --registry https://registry.npmjs.org/ \
-    --@pegma:registry=https://registry.npmjs.org/
-}
-test "$(npm_public config get registry)" = "https://registry.npmjs.org/"
-test "$(npm_public config get @pegma:registry)" = "https://registry.npmjs.org/"
 npm_public ping
 npm_public login
 npm_public whoami

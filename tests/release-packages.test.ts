@@ -1,8 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   PACKAGE_FILES,
@@ -39,6 +40,183 @@ async function startTestRegistry(
       const value = Number.parseInt(chunk.toString("utf8").trim(), 10);
       if (!Number.isSafeInteger(value)) {
         reject(new Error(`${label} registry returned an invalid port`));
+        return;
+      }
+      resolve(value);
+    });
+  });
+  return {
+    child,
+    recordPath,
+    url: `http://127.0.0.1:${port}/`,
+  };
+}
+
+function reviewedNpmExecPath() {
+  return (
+    process.env["npm_execpath"] ??
+    join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+  );
+}
+
+function cleanNpmEnvironment() {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => {
+      const normalized = key.toLowerCase();
+      return (
+        !normalized.startsWith("npm_config_") &&
+        normalized !== "node_auth_token" &&
+        normalized !== "npm_token" &&
+        normalized !== "npm_auth_token"
+      );
+    }),
+  );
+}
+
+function packDependencyFixture(
+  npmExecPath: string,
+  packageDirectory: string,
+  output: string,
+  userConfig: string,
+  globalConfig: string,
+) {
+  const result = spawnSync(
+    process.execPath,
+    [
+      npmExecPath,
+      "pack",
+      packageDirectory,
+      "--ignore-scripts",
+      "--json",
+      "--pack-destination",
+      output,
+      "--userconfig",
+      userConfig,
+      "--globalconfig",
+      globalConfig,
+    ],
+    { cwd: output, encoding: "utf8", env: cleanNpmEnvironment() },
+  );
+  if (result.status !== 0) {
+    throw new Error(`fixture pack failed: ${result.stderr}`);
+  }
+  const [packed] = JSON.parse(result.stdout) as {
+    name: string;
+    version: string;
+    filename: string;
+  }[];
+  if (packed === undefined) throw new Error("fixture pack returned no package");
+  const tarball = join(output, basename(packed.filename));
+  const integrity = `sha512-${createHash("sha512")
+    .update(readFileSync(tarball))
+    .digest("base64")}`;
+  return { ...packed, integrity, tarball };
+}
+
+async function startDependencyRegistry(
+  directory: string,
+  fixtures: ReturnType<typeof packDependencyFixture>[],
+) {
+  const serverScript = join(directory, "dependency-registry.mjs");
+  const fixturePath = join(directory, "dependency-fixtures.json");
+  const recordPath = join(directory, "dependency-requests.json");
+  await writeFile(
+    fixturePath,
+    JSON.stringify(
+      fixtures.map(({ name, version, integrity, tarball }) => ({
+        name,
+        version,
+        integrity,
+        tarball,
+      })),
+    ),
+  );
+  await writeFile(
+    serverScript,
+    [
+      'import { existsSync, readFileSync, writeFileSync } from "node:fs";',
+      'import { createServer } from "node:http";',
+      "const [recordPath, fixturePath] = process.argv.slice(2);",
+      'const fixtures = JSON.parse(readFileSync(fixturePath, "utf8"));',
+      "const requests = [];",
+      "const server = createServer((request, response) => {",
+      "  request.resume();",
+      "  requests.push({",
+      "    authorization: request.headers.authorization ?? null,",
+      "    method: request.method,",
+      "    url: request.url,",
+      "  });",
+      "  writeFileSync(recordPath, JSON.stringify(requests));",
+      '  if (request.url.startsWith("/-/npm/v1/security/")) {',
+      '    response.setHeader("content-type", "application/json");',
+      '    response.end("{}");',
+      "    return;",
+      "  }",
+      '  if (request.url.startsWith("/tarballs/")) {',
+      "    const fixture = fixtures.find(",
+      "      ({ tarball }) => request.url.endsWith(encodeURIComponent(tarball.split(/[\\\\/]/u).at(-1))),",
+      "    );",
+      "    if (fixture && existsSync(fixture.tarball)) {",
+      '      response.setHeader("content-type", "application/octet-stream");',
+      "      response.end(readFileSync(fixture.tarball));",
+      "      return;",
+      "    }",
+      "  }",
+      '  const path = request.url.split("?")[0].slice(1);',
+      "  const fixture = fixtures.find(",
+      "    ({ name }) => name === decodeURIComponent(path),",
+      "  );",
+      "  if (fixture) {",
+      "    const address = server.address();",
+      '    if (address === null || typeof address === "string") process.exit(1);',
+      "    const filename = fixture.tarball.split(/[\\\\/]/u).at(-1);",
+      '    response.setHeader("content-type", "application/json");',
+      "    response.end(",
+      "      JSON.stringify({",
+      "        _id: fixture.name,",
+      "        name: fixture.name,",
+      '        "dist-tags": { latest: fixture.version },',
+      "        versions: {",
+      "          [fixture.version]: {",
+      "            name: fixture.name,",
+      "            version: fixture.version,",
+      "            dist: {",
+      "              integrity: fixture.integrity,",
+      "              tarball: `http://127.0.0.1:${String(address.port)}/tarballs/${encodeURIComponent(filename)}`,",
+      "            },",
+      "          },",
+      "        },",
+      "      }),",
+      "    );",
+      "    return;",
+      "  }",
+      "  response.statusCode = 404;",
+      '  response.end("not found");',
+      "});",
+      'server.listen(0, "127.0.0.1", () => {',
+      "  const address = server.address();",
+      '  if (address === null || typeof address === "string") process.exit(1);',
+      "  process.stdout.write(`${String(address.port)}\\n`);",
+      "});",
+      "",
+    ].join("\n"),
+  );
+  const child = spawn(
+    process.execPath,
+    [serverScript, recordPath, fixturePath],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const port = await new Promise<number>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      reject(
+        new Error(`dependency registry exited early with ${String(code)}`),
+      );
+    });
+    child.stdout.once("data", (chunk: Buffer) => {
+      const value = Number.parseInt(chunk.toString("utf8").trim(), 10);
+      if (!Number.isSafeInteger(value)) {
+        reject(new Error("dependency registry returned an invalid port"));
         return;
       }
       resolve(value);
@@ -244,6 +422,156 @@ describe("release package metadata", () => {
       await rm(directory, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it("isolates the complete preparation from hostile npm configuration", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-preparation-isolation-"),
+    );
+    const npmExecPath = reviewedNpmExecPath();
+    expect(existsSync(npmExecPath)).toBe(true);
+    const version = spawnSync(process.execPath, [npmExecPath, "--version"], {
+      encoding: "utf8",
+    });
+    expect(version.status).toBe(0);
+    expect(version.stdout.trim()).toBe("11.18.0");
+
+    const fixtureUserConfig = join(directory, "fixture-user.npmrc");
+    const fixtureGlobalConfig = join(directory, "fixture-global.npmrc");
+    await writeFile(fixtureUserConfig, "");
+    await writeFile(fixtureGlobalConfig, "");
+    const fixtures = [
+      packDependencyFixture(
+        npmExecPath,
+        join(process.cwd(), "node_modules", "@pegma", "spine"),
+        directory,
+        fixtureUserConfig,
+        fixtureGlobalConfig,
+      ),
+      packDependencyFixture(
+        npmExecPath,
+        join(process.cwd(), "node_modules", "@pegma", "storage-core"),
+        directory,
+        fixtureUserConfig,
+        fixtureGlobalConfig,
+      ),
+    ];
+    const safe = await startDependencyRegistry(directory, fixtures);
+    const hostileScript = join(directory, "hostile-registry.mjs");
+    await writeFile(
+      hostileScript,
+      [
+        'import { writeFileSync } from "node:fs";',
+        'import { createServer } from "node:http";',
+        "const [recordPath] = process.argv.slice(2);",
+        "const server = createServer((request, response) => {",
+        "  request.resume();",
+        "  writeFileSync(",
+        "    recordPath,",
+        "    JSON.stringify({",
+        "      authorization: request.headers.authorization ?? null,",
+        "      method: request.method,",
+        "      url: request.url,",
+        "    }),",
+        "  );",
+        "  response.statusCode = 500;",
+        '  response.end("hostile registry must not be contacted");',
+        "});",
+        'server.listen(0, "127.0.0.1", () => {',
+        "  const address = server.address();",
+        '  if (address === null || typeof address === "string") process.exit(1);',
+        "  process.stdout.write(`${String(address.port)}\\n`);",
+        "});",
+        "",
+      ].join("\n"),
+    );
+    const hostile = await startTestRegistry(
+      hostileScript,
+      directory,
+      "hostile-preparation",
+      "unused",
+    );
+    const hostileUserConfig = join(directory, "hostile-user.npmrc");
+    await writeFile(
+      hostileUserConfig,
+      [
+        `registry=${hostile.url}`,
+        `@pegma:registry=${hostile.url}`,
+        `//127.0.0.1:${new URL(safe.url).port}/:_authToken=\${NODE_AUTH_TOKEN}`,
+        "",
+      ].join("\n"),
+    );
+    const environmentKeys = [
+      "npm_execpath",
+      "npm_config_registry",
+      "npm_config_@pegma:registry",
+      "npm_config_userconfig",
+      "NODE_AUTH_TOKEN",
+      "NPM_TOKEN",
+      "NPM_AUTH_TOKEN",
+    ];
+    const originalEnvironment = new Map(
+      environmentKeys.map((key) => [key, process.env[key]]),
+    );
+    try {
+      process.env["npm_execpath"] = npmExecPath;
+      for (const key of environmentKeys.slice(1)) delete process.env[key];
+      const normal = await prepareBootstrap({
+        output: join(directory, "normal"),
+        registry: safe.url,
+      });
+
+      process.env["npm_config_registry"] = hostile.url;
+      process.env["npm_config_@pegma:registry"] = hostile.url;
+      process.env["npm_config_userconfig"] = hostileUserConfig;
+      process.env["NODE_AUTH_TOKEN"] = "must-not-leak";
+      process.env["NPM_TOKEN"] = "must-not-leak";
+      process.env["NPM_AUTH_TOKEN"] = "must-not-leak";
+      const isolated = await prepareBootstrap({
+        output: join(directory, "isolated"),
+        registry: safe.url,
+      });
+
+      const normalRecord = normal.manifest as {
+        package: {
+          files: unknown;
+          integrity: string;
+          shasum: string;
+        };
+      };
+      const isolatedRecord = isolated.manifest as typeof normalRecord;
+      expect(isolatedRecord.package).toMatchObject(normalRecord.package);
+      expect(existsSync(hostile.recordPath)).toBe(false);
+      const requests = JSON.parse(readFileSync(safe.recordPath, "utf8")) as {
+        authorization: string | null;
+        method: string;
+        url: string;
+      }[];
+      expect(requests.length).toBeGreaterThan(0);
+      expect(
+        requests.every(({ authorization }) => authorization === null),
+      ).toBe(true);
+      const urls = requests.map(({ url }) => url.toLowerCase());
+      expect(urls.some((url) => url.includes("@pegma%2fspine"))).toBe(true);
+      expect(urls.some((url) => url.includes("@pegma%2fstorage-core"))).toBe(
+        true,
+      );
+      expect(urls.some((url) => url.startsWith("/-/npm/v1/security/"))).toBe(
+        true,
+      );
+    } finally {
+      for (const [key, value] of originalEnvironment) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      for (const registry of [safe, hostile]) {
+        if (registry.child.exitCode === null) registry.child.kill();
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it.each([undefined, null, "not-an-object"])(
     "rejects a malformed prepared package record cleanly: %j",

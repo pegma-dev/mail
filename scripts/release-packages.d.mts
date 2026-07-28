@@ -10,6 +10,7 @@ export interface ValidationOptions {
   readonly bootstrap?: boolean;
   readonly manifest?: string;
   readonly output?: string;
+  readonly registry?: string;
 }
 
 export const RELEASE_PACKAGES: readonly {

@@ -110,6 +110,7 @@ export function publicRegistryArguments(
 }
 
 function runPublicRegistryNpm(arguments_, options = {}) {
+  const { registry = PUBLIC_NPM_REGISTRY, ...runOptions } = options;
   const configDirectory = mkdtempSync(join(tmpdir(), "pegma-mail-npm-config-"));
   const userConfig = join(configDirectory, "user.npmrc");
   const globalConfig = join(configDirectory, "global.npmrc");
@@ -117,16 +118,19 @@ function runPublicRegistryNpm(arguments_, options = {}) {
   writeFileSync(globalConfig, "", { mode: 0o600 });
   try {
     return runNpm(
-      publicRegistryArguments([
-        ...arguments_,
-        "--userconfig",
-        userConfig,
-        "--globalconfig",
-        globalConfig,
-      ]),
+      publicRegistryArguments(
+        [
+          ...arguments_,
+          "--userconfig",
+          userConfig,
+          "--globalconfig",
+          globalConfig,
+        ],
+        registry,
+      ),
       {
-        ...options,
-        cwd: options.cwd ?? configDirectory,
+        ...runOptions,
+        cwd: runOptions.cwd ?? configDirectory,
         env: isolatedNpmEnvironment(),
       },
     );
@@ -391,14 +395,14 @@ function verifyPackedFiles(manifest, files) {
   }
 }
 
-async function smokeTestTarball(tarball, manifest) {
+async function smokeTestTarball(tarball, manifest, registry) {
   const directory = await mkdtemp(join(tmpdir(), "mail-release-smoke-"));
   try {
     await writeFile(
       join(directory, "package.json"),
       '{"name":"mail-release-smoke","private":true,"type":"module"}\n',
     );
-    runNpm(
+    runPublicRegistryNpm(
       [
         "install",
         "--ignore-scripts",
@@ -407,7 +411,7 @@ async function smokeTestTarball(tarball, manifest) {
         "--package-lock=false",
         tarball,
       ],
-      { cwd: directory, capture: true },
+      { cwd: directory, capture: true, registry },
     );
     run(
       process.execPath,
@@ -439,11 +443,17 @@ export async function prepareRelease(options = {}) {
   if ((await readdir(output)).length !== 0) {
     fail(`release output directory must be empty: ${output}`);
   }
-  runNpm(["audit", "--omit=dev"], { cwd: root });
-  runNpm(["run", "build"], { cwd: root });
-  const packedResult = runNpm(
+  runPublicRegistryNpm(["audit", "--omit=dev"], {
+    cwd: root,
+    registry: options.registry,
+  });
+  runPublicRegistryNpm(["run", "build"], {
+    cwd: root,
+    registry: options.registry,
+  });
+  const packedResult = runPublicRegistryNpm(
     ["pack", packageDirectory, "--json", "--pack-destination", output],
-    { cwd: root, capture: true },
+    { cwd: root, capture: true, registry: options.registry },
   );
   const [packed] = JSON.parse(packedResult.stdout);
   if (
@@ -463,7 +473,7 @@ export async function prepareRelease(options = {}) {
   ) {
     fail("tarball hashes do not match npm pack metadata");
   }
-  await smokeTestTarball(tarballPath, manifest);
+  await smokeTestTarball(tarballPath, manifest, options.registry);
   const prepared = {
     schemaVersion: 1,
     mode,
