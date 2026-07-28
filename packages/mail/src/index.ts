@@ -366,6 +366,47 @@ function scanOptions(input: MailPageOptions | undefined): {
   return cursor === undefined ? { limit } : { limit, cursor };
 }
 
+function scanRecordsSnapshot<TRecord>(
+  value: unknown,
+  limit: number,
+): readonly ScanRecord<TRecord>[] {
+  if (!Array.isArray(value)) {
+    throw new MailError(
+      "authoritative scan page records must be an array within the requested limit",
+    );
+  }
+  const lengthProperty = Object.getOwnPropertyDescriptor(value, "length");
+  const length =
+    lengthProperty !== undefined && Object.hasOwn(lengthProperty, "value")
+      ? lengthProperty.value
+      : undefined;
+  if (
+    !Number.isSafeInteger(length) ||
+    (length as number) < 0 ||
+    (length as number) > limit
+  ) {
+    throw new MailError(
+      "authoritative scan page records must be an array within the requested limit",
+    );
+  }
+  if (Object.getOwnPropertyDescriptor(value, Symbol.iterator) !== undefined) {
+    throw new MailError(
+      "authoritative scan page records must not define a custom iterator",
+    );
+  }
+  const snapshot: ScanRecord<TRecord>[] = [];
+  for (let index = 0; index < (length as number); index += 1) {
+    const property = Object.getOwnPropertyDescriptor(value, String(index));
+    if (property === undefined || !Object.hasOwn(property, "value")) {
+      throw new MailError(
+        "authoritative scan page records must contain only own data properties without holes",
+      );
+    }
+    snapshot.push(property.value as ScanRecord<TRecord>);
+  }
+  return Object.freeze(snapshot);
+}
+
 function encodeIdempotencyPart(value: string): string {
   return encodeURIComponent(value).replaceAll(
     /[!'()*]/g,
@@ -1220,18 +1261,14 @@ export function defineMail<TRecord>(
     );
     const scanned = fields["records"];
     const nextCursor = fields["nextCursor"];
-    if (!Array.isArray(scanned) || scanned.length > request.limit) {
-      throw new MailError(
-        "authoritative scan page records must be an array within the requested limit",
-      );
-    }
+    const snapshot = scanRecordsSnapshot<TRecord>(scanned, request.limit);
     if (nextCursor !== null && typeof nextCursor !== "string") {
       throw new MailError(
         "authoritative scan page nextCursor must be null or an opaque string",
       );
     }
     return Object.freeze({
-      records: scanned as readonly ScanRecord<TRecord>[],
+      records: snapshot,
       nextCursor,
     });
   };

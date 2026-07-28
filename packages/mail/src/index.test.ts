@@ -388,6 +388,94 @@ describe("@pegma/mail", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("rejects accessor scan elements without invoking them or provider work", async () => {
+    const records = await pending();
+    const page = await records.scan({ limit: 100 });
+    let elementReads = 0;
+    const hostile = [page.records[0]!];
+    Object.defineProperty(hostile, "0", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        elementReads += 1;
+        return page.records[0]!;
+      },
+    });
+    const accessorPage: CollectionStore<HostRecord> = {
+      ...records,
+      scan: async () => ({ records: hostile, nextCursor: null }),
+    };
+    const send = vi.fn(async () => ({ providerMessageRef: "never" }));
+
+    await expect(
+      worker(accessorPage, { provider: { send } }).runSendPage({ limit: 1 }),
+    ).rejects.toThrow(/own data properties/);
+    expect(elementReads).toBe(0);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("rejects a custom scan iterator without invoking it or provider work", async () => {
+    const records = await pending();
+    const page = await records.scan({ limit: 100 });
+    let iteratorCalls = 0;
+    const hostile = [page.records[0]!];
+    Object.defineProperty(hostile, Symbol.iterator, {
+      configurable: true,
+      value() {
+        iteratorCalls += 1;
+        return Array.prototype[Symbol.iterator].call(hostile);
+      },
+    });
+    const customIteratorPage: CollectionStore<HostRecord> = {
+      ...records,
+      scan: async () => ({ records: hostile, nextCursor: null }),
+    };
+    const send = vi.fn(async () => ({ providerMessageRef: "never" }));
+
+    await expect(
+      worker(customIteratorPage, { provider: { send } }).runSendPage({
+        limit: 1,
+      }),
+    ).rejects.toThrow(/custom iterator/);
+    expect(iteratorCalls).toBe(0);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("rejects holes in an adapter scan array before provider work", async () => {
+    const records = await pending();
+    const sparse = new Array<unknown>(1);
+    const sparsePage: CollectionStore<HostRecord> = {
+      ...records,
+      scan: async () => ({ records: sparse as never, nextCursor: null }),
+    };
+    const send = vi.fn(async () => ({ providerMessageRef: "never" }));
+
+    await expect(
+      worker(sparsePage, { provider: { send } }).runSendPage({ limit: 1 }),
+    ).rejects.toThrow(/without holes/);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("snapshots an ordinary adapter array and processes its record", async () => {
+    const records = await pending();
+    const page = await records.scan({ limit: 100 });
+    const validPage: CollectionStore<HostRecord> = {
+      ...records,
+      scan: async () => ({ records: [page.records[0]!], nextCursor: null }),
+    };
+    const send = vi.fn(async () => ({ providerMessageRef: "valid-array" }));
+
+    setTestTime("2026-07-27T12:00:01.000Z");
+    expect(
+      (
+        await worker(validPage, { provider: { send } }).runSendPage({
+          limit: 1,
+        })
+      ).results.map((result) => result.status),
+    ).toEqual(["accepted"]);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
   it("rejects numeric provider references and colliding candidate references before reconciliation or send", async () => {
     const records = await pending();
     const normal = worker(records, { acceptedCallbackMilliseconds: 1_000 });
