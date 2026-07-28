@@ -19,6 +19,13 @@ projected into the caller's collection and committed in the caller's
 `transact`. A convenience store, default collection, or managed outbox
 reintroduces the lost-send gap. `@pegma/audit` is the binding precedent.
 
+**Discovery is part of that atomicity.** Send, reconciliation, and terminal
+workers page the caller collection only through the storage adapter's
+authoritative `CollectionStore.scan`. Never add a host-attached source, marker,
+callback, or separately persisted post-commit hint. Cursors are opaque,
+adapter-issued, and saved only after a page completes; replay is safe through
+authoritative claims.
+
 **Idempotency keys are mandatory at the provider send port.** The worker is
 at-least-once. An adapter or provider that cannot honor the key has documented
 double-send risk; never add a workaround that pretends otherwise. Preparation,

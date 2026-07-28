@@ -7,11 +7,13 @@
  */
 
 import type { Clock, IsoTimestamp } from "@pegma/spine";
-import type {
-  CollectionDefinition,
-  CollectionStore,
-  EntityKey,
-  TransactionAction,
+import {
+  MAX_SCAN_PAGE_SIZE,
+  type CollectionDefinition,
+  type CollectionStore,
+  type EntityKey,
+  type ScanRecord,
+  type TransactionAction,
 } from "@pegma/storage-core";
 
 export type MailStatus =
@@ -67,14 +69,6 @@ export interface CreateMailJob {
 export interface MailCandidate {
   readonly partition: string;
   readonly jobId: string;
-}
-
-/**
- * Host-specific durable discovery. Candidates are hints: they may repeat,
- * arrive late, or refer to work that is no longer eligible.
- */
-export interface MailCandidateSource {
-  next(now: IsoTimestamp): Promise<MailCandidate | null>;
 }
 
 export interface MailProjection<TRecord> {
@@ -173,33 +167,38 @@ export interface AcknowledgeTerminalMail {
   readonly acknowledgementRef: string;
 }
 
-export interface MailTerminalCandidateRequest {
-  readonly partition: string;
-  readonly terminalBefore: IsoTimestamp;
-}
-
-/**
- * Host-owned bounded discovery for terminal mail. Returned candidates are
- * hints only and are always checked against the authoritative caller record.
- */
-export interface MailTerminalCandidateSource {
-  next(request: MailTerminalCandidateRequest): Promise<MailCandidate | null>;
-}
-
-export interface SweepTerminalMailOptions {
-  readonly terminalBefore: IsoTimestamp;
-  readonly candidates: MailTerminalCandidateSource;
-  /** Maximum candidate hints to pull. */
+export interface MailPageOptions {
+  /**
+   * Opaque adapter-issued continuation. Omit to start or restart a complete
+   * collection scan cycle.
+   */
+  readonly cursor?: string;
+  /** Maximum authoritative caller rows to examine. */
   readonly limit?: number;
 }
 
+export interface MailPageResult<TResult> {
+  readonly examined: number;
+  readonly results: readonly TResult[];
+  /**
+   * Persist only after the page has completed. Reusing the prior cursor after
+   * a crash may repeat records, which authoritative claims make safe.
+   */
+  readonly nextCursor: string | null;
+}
+
+export interface SweepTerminalMailOptions extends MailPageOptions {
+  readonly terminalBefore: IsoTimestamp;
+}
+
 export interface SweepTerminalMailResult {
-  /** Non-null candidate hints consumed from the bounded source. */
+  /** Authoritative caller rows consumed from the bounded scan page. */
   readonly examined: number;
   readonly deleted: number;
+  readonly nextCursor: string | null;
   /**
-   * A retry may be useful because the pull budget was exhausted or a
-   * conditional deletion lost a race. It does not claim the source has more.
+   * A retry may be useful because a conditional deletion lost a race or
+   * `nextCursor` continues the current scan cycle.
    */
   readonly more: boolean;
 }
@@ -214,8 +213,6 @@ export interface MailWorkerOptions<TRecord> {
   readonly reconciliation: MailReconciliationPort;
   readonly preparation: MailPreparationPort;
   readonly workerId: string;
-  readonly sendCandidates: MailCandidateSource;
-  readonly reconciliationCandidates: MailCandidateSource;
   /**
    * Claim duration, not an I/O timeout. Every post-claim adapter must enforce
    * its own shorter finite timeout and settle before this lease expires.
@@ -245,8 +242,14 @@ export type ReconcileMailResult =
 export interface MailWorker {
   send(candidate: MailCandidate): Promise<SendMailResult>;
   reconcile(candidate: MailCandidate): Promise<ReconcileMailResult>;
-  runSendOnce(): Promise<SendMailResult | null>;
-  runReconciliationOnce(): Promise<ReconcileMailResult | null>;
+  /** Scan and decide one bounded page using the sending cursor cycle. */
+  runSendPage(
+    options?: MailPageOptions,
+  ): Promise<MailPageResult<SendMailResult>>;
+  /** Scan and decide one bounded page using a separate reconciliation cursor. */
+  runReconciliationPage(
+    options?: MailPageOptions,
+  ): Promise<MailPageResult<ReconcileMailResult>>;
 }
 
 export interface Mail<TRecord> {
@@ -268,7 +271,6 @@ export interface Mail<TRecord> {
   ): Promise<MailJob | null>;
   sweep(
     records: CollectionStore<TRecord>,
-    partition: string,
     options: SweepTerminalMailOptions,
   ): Promise<SweepTerminalMailResult>;
 }
@@ -341,6 +343,68 @@ function positiveInteger(
     );
   }
   return value;
+}
+
+function scanOptions(input: MailPageOptions | undefined): {
+  readonly limit: number;
+  readonly cursor?: string;
+} {
+  const fields = ownDataSnapshot(
+    input ?? {},
+    ["cursor", "limit"],
+    "mail page options",
+  );
+  const limit = positiveInteger(
+    (fields["limit"] as number | undefined) ?? 100,
+    "limit",
+    MAX_SCAN_PAGE_SIZE,
+  );
+  const cursor = fields["cursor"];
+  if (cursor !== undefined && typeof cursor !== "string") {
+    throw new MailError("cursor must be an opaque adapter-issued string");
+  }
+  return cursor === undefined ? { limit } : { limit, cursor };
+}
+
+function scanRecordsSnapshot<TRecord>(
+  value: unknown,
+  limit: number,
+): readonly ScanRecord<TRecord>[] {
+  if (!Array.isArray(value)) {
+    throw new MailError(
+      "authoritative scan page records must be an array within the requested limit",
+    );
+  }
+  const lengthProperty = Object.getOwnPropertyDescriptor(value, "length");
+  const length =
+    lengthProperty !== undefined && Object.hasOwn(lengthProperty, "value")
+      ? lengthProperty.value
+      : undefined;
+  if (
+    !Number.isSafeInteger(length) ||
+    (length as number) < 0 ||
+    (length as number) > limit
+  ) {
+    throw new MailError(
+      "authoritative scan page records must be an array within the requested limit",
+    );
+  }
+  if (Object.getOwnPropertyDescriptor(value, Symbol.iterator) !== undefined) {
+    throw new MailError(
+      "authoritative scan page records must not define a custom iterator",
+    );
+  }
+  const snapshot: ScanRecord<TRecord>[] = [];
+  for (let index = 0; index < (length as number); index += 1) {
+    const property = Object.getOwnPropertyDescriptor(value, String(index));
+    if (property === undefined || !Object.hasOwn(property, "value")) {
+      throw new MailError(
+        "authoritative scan page records must contain only own data properties without holes",
+      );
+    }
+    snapshot.push(property.value as ScanRecord<TRecord>);
+  }
+  return Object.freeze(snapshot);
 }
 
 function encodeIdempotencyPart(value: string): string {
@@ -426,36 +490,6 @@ function dataProperty(value: unknown, name: string): unknown {
   return property !== undefined && Object.hasOwn(property, "value")
     ? property.value
     : undefined;
-}
-
-function dataMethod(
-  value: unknown,
-  name: string,
-  subject: string,
-): (...arguments_: unknown[]) => unknown {
-  if (
-    value === null ||
-    (typeof value !== "object" && typeof value !== "function")
-  ) {
-    throw new MailError(`${subject} must be an object`);
-  }
-  let owner: object | null = value;
-  while (owner !== null) {
-    const property = Object.getOwnPropertyDescriptor(owner, name);
-    if (property !== undefined) {
-      if (
-        !Object.hasOwn(property, "value") ||
-        typeof property.value !== "function"
-      ) {
-        throw new MailError(
-          `${subject}.${name} must be a data-property method`,
-        );
-      }
-      return property.value as (...arguments_: unknown[]) => unknown;
-    }
-    owner = Object.getPrototypeOf(owner) as object | null;
-  }
-  throw new MailError(`${subject}.${name} must be a data-property method`);
 }
 
 const MAIL_JOB_FIELDS = [
@@ -1167,6 +1201,78 @@ export function defineMail<TRecord>(
     return result;
   };
 
+  const mailFromScan = (
+    scanned: ScanRecord<TRecord>,
+  ): {
+    readonly candidate: MailCandidate;
+    readonly job: MailJob;
+    readonly key: EntityKey;
+    readonly version: string;
+  } | null => {
+    const fields = ownDataSnapshot(
+      scanned,
+      ["key", "value", "version"],
+      "authoritative scan record",
+    );
+    const value = fields["value"] as TRecord;
+    const version = fields["version"];
+    if (typeof version !== "string" || version.length === 0) {
+      throw new MailError(
+        "authoritative scan record version must be a non-empty opaque string",
+      );
+    }
+    const job = jobFrom(projection, value, true);
+    if (job === null) return null;
+    requireProjectedKey(projection, job, value);
+    const storedKey = normalizeEntityKey(fields["key"], "scan key");
+    const decodedKey = normalizeEntityKey(
+      projection.collection.key(value),
+      "collection key",
+    );
+    if (!sameKey(storedKey, decodedKey)) {
+      throw new MailError(
+        "authoritative scan key does not match the decoded caller record key",
+      );
+    }
+    return Object.freeze({
+      candidate: Object.freeze({
+        partition: job.partition,
+        jobId: job.id,
+      }),
+      job,
+      key: storedKey,
+      version,
+    });
+  };
+
+  const scanPage = async (
+    records: CollectionStore<TRecord>,
+    input: MailPageOptions | undefined,
+  ): Promise<{
+    readonly records: readonly ScanRecord<TRecord>[];
+    readonly nextCursor: string | null;
+  }> => {
+    const request = scanOptions(input);
+    const raw = await records.scan(request);
+    const fields = ownDataSnapshot(
+      raw,
+      ["records", "nextCursor"],
+      "authoritative scan page",
+    );
+    const scanned = fields["records"];
+    const nextCursor = fields["nextCursor"];
+    const snapshot = scanRecordsSnapshot<TRecord>(scanned, request.limit);
+    if (nextCursor !== null && typeof nextCursor !== "string") {
+      throw new MailError(
+        "authoritative scan page nextCursor must be null or an opaque string",
+      );
+    }
+    return Object.freeze({
+      records: snapshot,
+      nextCursor,
+    });
+  };
+
   async function updateJob(
     records: CollectionStore<TRecord>,
     candidate: MailCandidate,
@@ -1635,15 +1741,33 @@ export function defineMail<TRecord>(
       return {
         send,
         reconcile,
-        async runSendOnce() {
-          const now = clockNow().text;
-          const candidate = await options.sendCandidates.next(now);
-          return candidate === null ? null : send(candidate);
+        async runSendPage(input) {
+          const page = await scanPage(options.records, input);
+          const results: SendMailResult[] = [];
+          for (const scanned of page.records) {
+            const discovered = mailFromScan(scanned);
+            if (discovered === null) continue;
+            results.push(await send(discovered.candidate));
+          }
+          return Object.freeze({
+            examined: page.records.length,
+            results: Object.freeze(results),
+            nextCursor: page.nextCursor,
+          });
         },
-        async runReconciliationOnce() {
-          const now = clockNow().text;
-          const candidate = await options.reconciliationCandidates.next(now);
-          return candidate === null ? null : reconcile(candidate);
+        async runReconciliationPage(input) {
+          const page = await scanPage(options.records, input);
+          const results: ReconcileMailResult[] = [];
+          for (const scanned of page.records) {
+            const discovered = mailFromScan(scanned);
+            if (discovered === null) continue;
+            results.push(await reconcile(discovered.candidate));
+          }
+          return Object.freeze({
+            examined: page.records.length,
+            results: Object.freeze(results),
+            nextCursor: page.nextCursor,
+          });
         },
       };
     },
@@ -1807,88 +1931,51 @@ export function defineMail<TRecord>(
       });
     },
 
-    async sweep(records, partitionInput, input) {
+    async sweep(records, input) {
       const options = ownDataSnapshot(
         input,
-        ["terminalBefore", "candidates", "limit"],
+        ["terminalBefore"],
         "sweep options",
       );
-      const partition = requireText(partitionInput, "partition", 300);
       const terminalBeforeText = timestamp(
         options["terminalBefore"],
         "terminalBefore",
       );
       const terminalBefore = epoch(terminalBeforeText, "terminalBefore");
-      const limit = positiveInteger(
-        (options["limit"] as number | undefined) ?? 100,
-        "limit",
-        1_000,
-      );
-      const candidates = options["candidates"];
-      const nextCandidate = dataMethod(candidates, "next", "sweep candidates");
-      let examined = 0;
+      const page = await scanPage(records, input);
       let deleted = 0;
       let more = false;
-      let sourceExhausted = false;
-      for (let pull = 0; pull < limit; pull += 1) {
-        const hint = await Reflect.apply(nextCandidate, candidates, [
-          Object.freeze({
-            partition,
-            terminalBefore: terminalBeforeText,
-          }),
-        ]);
-        if (hint === null) {
-          sourceExhausted = true;
-          break;
-        }
-        examined += 1;
-        const candidate = normalizeCandidate(hint);
-        if (candidate.partition !== partition) continue;
-        const candidateKey = key(candidate);
-        const versioned = await records.getVersioned(candidateKey);
-        if (versioned === null) continue;
-        const job = jobFrom(projection, versioned.value, true);
-        const actualKey = normalizeEntityKey(
-          projection.collection.key(versioned.value),
-          "collection key",
-        );
-        if (!sameKey(actualKey, candidateKey)) {
-          throw new MailError(
-            "terminal mail record does not match its authoritative projection key",
-          );
-        }
+      for (const scanned of page.records) {
+        const discovered = mailFromScan(scanned);
+        if (discovered === null) continue;
+        const job = discovered.job;
         if (
-          job === null ||
-          job.partition !== candidate.partition ||
-          job.id !== candidate.jobId ||
-          (job.status !== "delivered" &&
-            job.status !== "dead_letter" &&
-            job.status !== "terminal_unknown")
+          job.status !== "delivered" &&
+          job.status !== "dead_letter" &&
+          job.status !== "terminal_unknown"
         ) {
           continue;
-        }
-        const expectedKey = key({
-          partition: job.partition,
-          jobId: job.id,
-        });
-        if (!sameKey(actualKey, expectedKey)) {
-          throw new MailError(
-            "terminal mail record does not match its authoritative projection key",
-          );
         }
         const eligible =
           job.terminalAt !== undefined &&
           epoch(job.terminalAt, "job.terminalAt") < terminalBefore &&
           (job.status === "delivered" || job.acknowledgedAt !== undefined);
         if (!eligible) continue;
-        if (await records.deleteIfUnchanged(actualKey, versioned.version)) {
+        if (
+          await records.deleteIfUnchanged(discovered.key, discovered.version)
+        ) {
           deleted += 1;
         } else {
           more = true;
         }
       }
-      if (!sourceExhausted && examined >= limit) more = true;
-      return { examined, deleted, more };
+      if (page.nextCursor !== null) more = true;
+      return Object.freeze({
+        examined: page.records.length,
+        deleted,
+        nextCursor: page.nextCursor,
+        more,
+      });
     },
   };
 }

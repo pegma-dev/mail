@@ -356,7 +356,20 @@ describe("release package metadata", () => {
   });
 
   it("validates package metadata, exact dependencies, and lockfile together", async () => {
-    await expect(validateRepository()).resolves.toBeDefined();
+    const releaseTag = process.env.RELEASE_TAG;
+    const releaseCommit = process.env.RELEASE_COMMIT;
+    delete process.env.RELEASE_TAG;
+    delete process.env.RELEASE_COMMIT;
+    try {
+      await expect(validateRepository()).resolves.toMatchObject({
+        releaseTag: undefined,
+      });
+    } finally {
+      if (releaseTag === undefined) delete process.env.RELEASE_TAG;
+      else process.env.RELEASE_TAG = releaseTag;
+      if (releaseCommit === undefined) delete process.env.RELEASE_COMMIT;
+      else process.env.RELEASE_COMMIT = releaseCommit;
+    }
   });
 
   it.each([
@@ -944,6 +957,16 @@ describe("release package metadata", () => {
     expect(instructions).toContain(
       "npm_public publish ./.bootstrap-release/pegma-mail-0.0.0.tgz --access public --tag bootstrap",
     );
+    const testGate = instructions.indexOf("npm_public test");
+    const releaseTag = instructions.indexOf("export RELEASE_TAG=v0.0.0");
+    const releaseCommit = instructions.indexOf(
+      'export RELEASE_COMMIT="$(git rev-parse HEAD)"',
+    );
+    const pack = instructions.indexOf("npm_public run bootstrap:pack");
+    expect(testGate).toBeGreaterThan(-1);
+    expect(releaseTag).toBeGreaterThan(testGate);
+    expect(releaseCommit).toBeGreaterThan(releaseTag);
+    expect(pack).toBeGreaterThan(releaseCommit);
   });
 
   it("defeats npm 11.18 scoped-registry precedence with an explicit scope override", async () => {

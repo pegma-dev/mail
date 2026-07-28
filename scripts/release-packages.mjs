@@ -280,7 +280,7 @@ export async function validateRepository(options = {}) {
   }
   if (
     manifest.dependencies?.["@pegma/spine"] !== "0.1.1" ||
-    manifest.dependencies?.["@pegma/storage-core"] !== "0.3.0" ||
+    manifest.dependencies?.["@pegma/storage-core"] !== "0.4.0" ||
     Object.keys(manifest.dependencies ?? {}).length !== 2
   ) {
     fail(
