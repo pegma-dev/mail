@@ -2,9 +2,12 @@
 
 ## Status
 
-**Stage:** first advertised supported release prepared (`0.1.0`, awaiting
-reviewed merge, protected tag, and OIDC publication). The separate `0.0.0`
-package-name bootstrap remains manual-only.
+**Stage:** first advertised supported release published
+(`@pegma/mail@0.1.0`) from the protected, signed annotated `v0.1.0` tag
+through the environment-protected GitHub trusted-publishing/OIDC workflow,
+with npm SLSA provenance. The earlier `0.0.0` package-name bootstrap was the
+one-time manual prerequisite; it remains isolated and non-advertised rather
+than part of the normal release lane.
 
 **Trigger:** fired on 2026-07-27. Support Desk supplied a stabilized generic
 outbound state machine and Identity supplied the second real consumer:
