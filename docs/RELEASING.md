@@ -11,6 +11,11 @@ The bootstrap tooling never invokes `npm publish`. Every normal release
 command, prepared manifest check, and OIDC workflow stage rejects the entire
 `0.0.x` range and requires `0.1.0` or later.
 
+The public manifest now identifies `0.1.0` as the first advertised supported
+release. Its reviewed release notes are in
+[RELEASE_NOTES.md](RELEASE_NOTES.md). This does not broaden the bootstrap:
+`0.0.0` remains usable only through the manual procedure below.
+
 ## Common source requirements
 
 Every published artifact comes from a protected, signed, annotated `vX.Y.Z`
@@ -141,9 +146,9 @@ Do not announce an unqualified install until that correction is visible in
 
 ## Normal OIDC releases (`0.1.0` and later)
 
-Update `packages/mail/package.json` and the lockfile through a reviewed pull
-request. After merge, create and push a protected signed annotated `vX.Y.Z`
-tag at the exact `origin/main` commit, then run:
+Update `packages/mail/package.json`, the lockfile, and public release notes
+through a reviewed pull request. After merge, create and push a protected
+signed annotated `vX.Y.Z` tag at the exact `origin/main` commit, then run:
 
 ```sh
 gh release create vX.Y.Z --verify-tag

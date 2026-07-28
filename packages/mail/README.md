@@ -100,7 +100,8 @@ webhook receipt store, inbound mail, bulk mail, or deliverability abstraction.
 
 ## Distribution
 
-Version `0.0.0` exists only for the one-time, manual npm package-name
-bootstrap. It is packed and integrity-verified by a separate mode. Every
-`0.0.x` version is rejected by the normal OIDC lane; the first advertised
-supported release is `0.1.0`. See the repository release procedure.
+Version `0.1.0` is the first advertised supported release and requires
+`@pegma/spine@0.1.1` and `@pegma/storage-core@0.4.0` exactly. Version `0.0.0`
+exists only for the one-time, manual npm package-name bootstrap; it is packed
+and integrity-verified by a separate mode. Every `0.0.x` version remains
+rejected by the normal OIDC lane. See the repository release procedure.
