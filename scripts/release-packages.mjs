@@ -554,10 +554,21 @@ function requireTrustedPublishingNpm() {
 }
 
 export async function checkRegistry(options = {}) {
-  const { manifest } = await validateRepository(options);
+  const { manifest, releaseTag } = await validateRepository(options);
   requireNormalReleaseVersion(manifest.version);
+  let prepared = null;
+  if (options.manifest !== undefined) {
+    prepared = await verifyPreparedManifest(resolve(options.manifest));
+    if (
+      prepared.package.name !== manifest.name ||
+      prepared.package.version !== manifest.version ||
+      (releaseTag !== undefined && prepared.releaseTag !== releaseTag)
+    ) {
+      fail("prepared release manifest does not match its verified source");
+    }
+  }
   const registry = queryRegistryIntegrity(manifest.name, manifest.version);
-  if (options.manifest === undefined) {
+  if (prepared === null) {
     if (registry !== null) {
       fail(
         `${manifest.name}@${manifest.version} already exists in the registry`,
@@ -565,7 +576,6 @@ export async function checkRegistry(options = {}) {
     }
     return "absent";
   }
-  const prepared = await verifyPreparedManifest(resolve(options.manifest));
   return decidePublication(prepared.package.integrity, registry);
 }
 

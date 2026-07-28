@@ -166,4 +166,6 @@ no dependencies and publishes the exact prepared tarball with provenance.
 `npm run release:registry -- -- --manifest .release/package-manifest.json`
 allows only two retry-safe outcomes: absent means publish, and an existing
 byte-identical `dist.integrity` means skip. Different bytes or any registry
-error other than `E404` stops the release.
+error other than `E404` stops the release. When a prepared manifest is supplied,
+its identity, version, source commit, tarball name, hashes, and exact file
+inventory are verified before npm is contacted.

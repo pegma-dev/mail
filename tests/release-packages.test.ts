@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -108,6 +108,58 @@ async function writePreparedReleaseFixture(directory: string, version: string) {
     }),
   );
   return manifestPath;
+}
+
+async function writeReleaseRepositoryFixture(
+  directory: string,
+  version = "0.1.0",
+) {
+  const sourceRoot = process.cwd();
+  const packageDirectory = join(directory, "packages", "mail");
+  await mkdir(packageDirectory, { recursive: true });
+  const rootManifest = JSON.parse(
+    readFileSync(join(sourceRoot, "package.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const packageManifest = JSON.parse(
+    readFileSync(join(sourceRoot, "packages", "mail", "package.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const lockfile = JSON.parse(
+    readFileSync(join(sourceRoot, "package-lock.json"), "utf8"),
+  ) as {
+    packages: Record<string, { version?: string }>;
+  };
+  packageManifest["version"] = version;
+  lockfile.packages["packages/mail"]!.version = version;
+  await Promise.all([
+    writeFile(
+      join(directory, "package.json"),
+      `${JSON.stringify(rootManifest, null, 2)}\n`,
+    ),
+    writeFile(
+      join(directory, "package-lock.json"),
+      `${JSON.stringify(lockfile, null, 2)}\n`,
+    ),
+    writeFile(
+      join(packageDirectory, "package.json"),
+      `${JSON.stringify(packageManifest, null, 2)}\n`,
+    ),
+    writeFile(
+      join(packageDirectory, "tsconfig.json"),
+      readFileSync(
+        join(sourceRoot, "packages", "mail", "tsconfig.json"),
+        "utf8",
+      ),
+    ),
+    writeFile(
+      join(packageDirectory, "README.md"),
+      readFileSync(join(sourceRoot, "packages", "mail", "README.md"), "utf8"),
+    ),
+    writeFile(
+      join(packageDirectory, "LICENSE"),
+      readFileSync(join(sourceRoot, "packages", "mail", "LICENSE"), "utf8"),
+    ),
+  ]);
+  return directory;
 }
 
 function packDependencyFixture(
@@ -380,6 +432,81 @@ describe("release package metadata", () => {
         package: { name: "@pegma/mail", version: "0.1.0" },
       });
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies every supplied manifest before the first registry query", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-registry-order-test-"),
+    );
+    const root = join(directory, "repository");
+    const recordPath = join(directory, "registry-query.json");
+    const fakeNpm = join(directory, "fake-npm.mjs");
+    const originalNpmExecPath = process.env["npm_execpath"];
+    try {
+      await writeReleaseRepositoryFixture(root);
+      await writeFile(
+        fakeNpm,
+        [
+          'import { writeFileSync } from "node:fs";',
+          `const recordPath = ${JSON.stringify(recordPath)};`,
+          "writeFileSync(recordPath, JSON.stringify(process.argv.slice(2)));",
+          'process.stderr.write("npm error code E404\\n");',
+          "process.exit(1);",
+          "",
+        ].join("\n"),
+      );
+      process.env["npm_execpath"] = fakeNpm;
+
+      const lowDirectory = join(directory, "low");
+      await mkdir(lowDirectory);
+      const low = await writePreparedReleaseFixture(lowDirectory, "0.0.999");
+
+      const malformedDirectory = join(directory, "malformed");
+      await mkdir(malformedDirectory);
+      const malformed = join(malformedDirectory, "package-manifest.json");
+      await writeFile(malformed, "{}\n");
+
+      const tamperedDirectory = join(directory, "tampered");
+      await mkdir(tamperedDirectory);
+      const tampered = await writePreparedReleaseFixture(
+        tamperedDirectory,
+        "0.1.0",
+      );
+      const tamperedRecord = JSON.parse(readFileSync(tampered, "utf8")) as {
+        package: { integrity: string };
+      };
+      tamperedRecord.package.integrity = "sha512-dGFtcGVyZWQ=";
+      await writeFile(tampered, `${JSON.stringify(tamperedRecord, null, 2)}\n`);
+
+      for (const [path, error] of [
+        [low, "prepared package manifest is invalid"],
+        [malformed, "prepared package manifest is invalid"],
+        [tampered, "prepared tarball has changed"],
+      ] as const) {
+        await rm(recordPath, { force: true });
+        await expect(
+          checkRegistry({ root, releaseTag: "v0.1.0", manifest: path }),
+        ).rejects.toThrow(error);
+        expect(existsSync(recordPath)).toBe(false);
+      }
+
+      const validDirectory = join(directory, "valid");
+      await mkdir(validDirectory);
+      const valid = await writePreparedReleaseFixture(validDirectory, "0.1.0");
+      await expect(
+        checkRegistry({ root, releaseTag: "v0.1.0", manifest: valid }),
+      ).resolves.toBe("publish");
+      expect(JSON.parse(readFileSync(recordPath, "utf8"))).toContain(
+        "@pegma/mail@0.1.0",
+      );
+    } finally {
+      if (originalNpmExecPath === undefined) {
+        delete process.env["npm_execpath"];
+      } else {
+        process.env["npm_execpath"] = originalNpmExecPath;
+      }
       await rm(directory, { recursive: true, force: true });
     }
   });
@@ -751,6 +878,29 @@ describe("release package metadata", () => {
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).not.toContain("NODE_AUTH_TOKEN");
     expect(workflow).not.toContain("bootstrap:");
+  });
+
+  it("checks the release version before every registry-backed workflow step", () => {
+    const workflow = readFileSync(
+      join(process.cwd(), ".github", "workflows", "publish.yml"),
+      "utf8",
+    );
+    const prepare = workflow.slice(
+      workflow.indexOf("  prepare:"),
+      workflow.indexOf("\n  publish:"),
+    );
+    const setupNode = prepare.indexOf("- name: Set up Node.js");
+    const releaseCheck = prepare.indexOf(
+      "- name: Require an advertised release version",
+    );
+    const installNpm = prepare.indexOf("- name: Use the reviewed npm release");
+    const installDependencies = prepare.indexOf("- name: Install dependencies");
+    const completeGate = prepare.indexOf("- name: Run the complete gate");
+    expect(setupNode).toBeGreaterThan(-1);
+    expect(releaseCheck).toBeGreaterThan(setupNode);
+    for (const laterStep of [installNpm, installDependencies, completeGate]) {
+      expect(laterStep).toBeGreaterThan(releaseCheck);
+    }
   });
 
   it("installs the reviewed npm before every CI matrix gate", () => {
