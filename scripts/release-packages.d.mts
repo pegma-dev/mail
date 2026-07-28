@@ -17,6 +17,10 @@ export const RELEASE_PACKAGES: readonly {
   readonly name: string;
 }[];
 export const PACKAGE_FILES: readonly string[];
+export function publicRegistryArguments(
+  arguments_: readonly string[],
+  registry?: string,
+): string[];
 export function parseArguments(
   arguments_: readonly string[],
 ): ValidationOptions;

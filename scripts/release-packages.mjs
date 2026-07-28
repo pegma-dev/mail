@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
   mkdtemp,
   mkdir,
@@ -77,6 +78,61 @@ function runNpm(arguments_, options = {}) {
         shell: process.platform === "win32",
       })
     : run(process.execPath, [npmExecPath, ...arguments_], options);
+}
+
+function isolatedNpmEnvironment() {
+  const environment = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    const normalized = key.toLowerCase();
+    if (
+      normalized.startsWith("npm_config_") ||
+      normalized === "node_auth_token" ||
+      normalized === "npm_token" ||
+      normalized === "npm_auth_token"
+    ) {
+      continue;
+    }
+    environment[key] = value;
+  }
+  return environment;
+}
+
+export function publicRegistryArguments(
+  arguments_,
+  registry = PUBLIC_NPM_REGISTRY,
+) {
+  return [
+    ...arguments_,
+    "--registry",
+    registry,
+    `--@pegma:registry=${registry}`,
+  ];
+}
+
+function runPublicRegistryNpm(arguments_, options = {}) {
+  const configDirectory = mkdtempSync(join(tmpdir(), "pegma-mail-npm-config-"));
+  const userConfig = join(configDirectory, "user.npmrc");
+  const globalConfig = join(configDirectory, "global.npmrc");
+  writeFileSync(userConfig, "", { mode: 0o600 });
+  writeFileSync(globalConfig, "", { mode: 0o600 });
+  try {
+    return runNpm(
+      publicRegistryArguments([
+        ...arguments_,
+        "--userconfig",
+        userConfig,
+        "--globalconfig",
+        globalConfig,
+      ]),
+      {
+        ...options,
+        cwd: options.cwd ?? configDirectory,
+        env: isolatedNpmEnvironment(),
+      },
+    );
+  } finally {
+    rmSync(configDirectory, { recursive: true, force: true });
+  }
 }
 
 function gitCommand() {
@@ -439,15 +495,8 @@ export async function prepareBootstrap(options = {}) {
 
 function queryRegistryIntegrity(name, version) {
   const spec = `${name}@${version}`;
-  const result = runNpm(
-    [
-      "view",
-      spec,
-      "dist.integrity",
-      "--json",
-      "--registry",
-      PUBLIC_NPM_REGISTRY,
-    ],
+  const result = runPublicRegistryNpm(
+    ["view", spec, "dist.integrity", "--json"],
     {
       capture: true,
       allowFailure: true,
@@ -648,15 +697,13 @@ export async function publishPreparedRelease(options = {}) {
     queryRegistryIntegrity(record.name, record.version),
   );
   if (decision === "skip") return;
-  runNpm(
+  runPublicRegistryNpm(
     [
       "publish",
       resolve(dirname(manifestPath), record.tarball),
       "--access",
       "public",
       "--provenance",
-      "--registry",
-      PUBLIC_NPM_REGISTRY,
     ],
     { cwd: dirname(manifestPath) },
   );
