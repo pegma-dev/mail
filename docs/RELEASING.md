@@ -67,16 +67,19 @@ The registry decision must be `publish`. Manually publish only the exact
 verified tarball, under the non-advertised bootstrap tag:
 
 ```sh
-npm login
-npm whoami
-npm publish ./.bootstrap-release/pegma-mail-0.0.0.tgz --access public --tag bootstrap
+npm ping --registry https://registry.npmjs.org/
+npm login --registry https://registry.npmjs.org/
+npm whoami --registry https://registry.npmjs.org/
+npm publish ./.bootstrap-release/pegma-mail-0.0.0.tgz --access public --tag bootstrap --registry https://registry.npmjs.org/
 ```
 
 Do not publish the directory, rebuild, rename the tarball, or substitute
-another path. Rerun the same `bootstrap:registry` command; it must report
-`skip`, proving that npm exposes byte-identical `dist.integrity`. An
-interrupted retry is therefore safe: absent means publish the exact tarball,
-byte-identical means stop successfully, and different bytes stop as an error.
+another path or registry. The bootstrap registry check is hard-pinned to the
+same public npm registry, independent of user, project, and `@pegma` npm
+configuration. Rerun the same `bootstrap:registry` command; it must report
+`skip`, proving that npm exposes byte-identical `dist.integrity`. An interrupted
+retry is therefore safe: absent means publish the exact tarball, byte-identical
+means stop successfully, and different bytes stop as an error.
 
 ## Configure npm trust immediately
 

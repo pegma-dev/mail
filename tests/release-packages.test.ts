@@ -41,6 +41,20 @@ describe("release package metadata", () => {
     });
   });
 
+  it("gives every bootstrap shortcut its safe artifact default", () => {
+    const rootManifest = JSON.parse(
+      readFileSync(join(process.cwd(), "package.json"), "utf8"),
+    ) as { scripts: Record<string, string> };
+    expect(rootManifest.scripts).toMatchObject({
+      "bootstrap:pack":
+        "node scripts/release-packages.mjs bootstrap-pack --output .bootstrap-release",
+      "bootstrap:registry":
+        "node scripts/release-packages.mjs bootstrap-registry --manifest .bootstrap-release/package-manifest.json",
+      "bootstrap:verify":
+        "node scripts/release-packages.mjs bootstrap-verify --manifest .bootstrap-release/package-manifest.json",
+    });
+  });
+
   it("validates package metadata, exact dependencies, and lockfile together", async () => {
     await expect(validateRepository()).resolves.toBeDefined();
   });
@@ -112,6 +126,11 @@ describe("release package metadata", () => {
         fakeNpm,
         [
           'const integrity = process.env["FAKE_NPM_INTEGRITY"];',
+          'const registryIndex = process.argv.indexOf("--registry");',
+          'if (process.argv[registryIndex + 1] !== "https://registry.npmjs.org/") {',
+          '  process.stderr.write("public npm registry was not pinned\\n");',
+          "  process.exit(2);",
+          "}",
           'if (integrity === "absent") {',
           '  process.stderr.write("npm error code E404\\n");',
           "  process.exit(1);",
@@ -192,6 +211,25 @@ describe("release package metadata", () => {
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).not.toContain("NODE_AUTH_TOKEN");
     expect(workflow).not.toContain("bootstrap:");
+  });
+
+  it("pins every manual bootstrap registry operation to npmjs", () => {
+    const instructions = readFileSync(
+      join(process.cwd(), "docs", "RELEASING.md"),
+      "utf8",
+    );
+    expect(instructions).toContain(
+      "npm ping --registry https://registry.npmjs.org/",
+    );
+    expect(instructions).toContain(
+      "npm login --registry https://registry.npmjs.org/",
+    );
+    expect(instructions).toContain(
+      "npm whoami --registry https://registry.npmjs.org/",
+    );
+    expect(instructions).toContain(
+      "--tag bootstrap --registry https://registry.npmjs.org/",
+    );
   });
 });
 

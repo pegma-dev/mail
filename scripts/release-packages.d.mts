@@ -53,7 +53,7 @@ export function prepareBootstrap(options?: ValidationOptions): Promise<{
 }>;
 export function checkBootstrapRegistry(
   options?: ValidationOptions,
-): Promise<"absent" | "publish" | "skip">;
+): Promise<"publish" | "skip">;
 export function publishPreparedRelease(
   options?: ValidationOptions,
 ): Promise<void>;

@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 const PACKAGE = { directory: "mail", name: "@pegma/mail" };
 const REPOSITORY_URL = "git+https://github.com/pegma-dev/mail.git";
 const REVIEWED_NPM_VERSION = "11.18.0";
+const PUBLIC_NPM_REGISTRY = "https://registry.npmjs.org/";
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const BOOTSTRAP_VERSION = "0.0.0";
 const BOOTSTRAP_TAG = `v${BOOTSTRAP_VERSION}`;
@@ -198,6 +199,7 @@ export async function validateRepository(options = {}) {
     manifest.license !== "MIT" ||
     manifest.type !== "module" ||
     manifest.publishConfig?.access !== "public" ||
+    manifest.publishConfig?.registry !== PUBLIC_NPM_REGISTRY ||
     manifest.engines?.node !== ">=22" ||
     manifest.repository?.type !== "git" ||
     manifest.repository?.url !== REPOSITORY_URL ||
@@ -437,10 +439,20 @@ export async function prepareBootstrap(options = {}) {
 
 function queryRegistryIntegrity(name, version) {
   const spec = `${name}@${version}`;
-  const result = runNpm(["view", spec, "dist.integrity", "--json"], {
-    capture: true,
-    allowFailure: true,
-  });
+  const result = runNpm(
+    [
+      "view",
+      spec,
+      "dist.integrity",
+      "--json",
+      "--registry",
+      PUBLIC_NPM_REGISTRY,
+    ],
+    {
+      capture: true,
+      allowFailure: true,
+    },
+  );
   if (result.status === 0) {
     const integrity = JSON.parse(result.stdout);
     if (typeof integrity !== "string" || integrity.length === 0) {
@@ -643,6 +655,8 @@ export async function publishPreparedRelease(options = {}) {
       "--access",
       "public",
       "--provenance",
+      "--registry",
+      PUBLIC_NPM_REGISTRY,
     ],
     { cwd: dirname(manifestPath) },
   );
