@@ -2,8 +2,9 @@
 
 ## Status
 
-**Stage:** extraction bootstrap complete (`0.0.0`, awaiting the explicit
-manual-only package-name bootstrap)
+**Stage:** first advertised supported release prepared (`0.1.0`, awaiting
+reviewed merge, protected tag, and OIDC publication). The separate `0.0.0`
+package-name bootstrap remains manual-only.
 
 **Trigger:** fired on 2026-07-27. Support Desk supplied a stabilized generic
 outbound state machine and Identity supplied the second real consumer:
@@ -17,12 +18,12 @@ and adversarial tests are the conformance evidence. Support-specific ticket
 threading, callback receipt/authentication, and template rendering remain in
 Support Desk.
 
-**Package:** `@pegma/mail` at bootstrap version `0.0.0`
+**Package:** `@pegma/mail@0.1.0`
 
 **Dependencies:** exactly `@pegma/spine@0.1.1` and
 `@pegma/storage-core@0.4.0`
 
-## Delivered bootstrap
+## Delivered first release
 
 - A caller-owned `MailProjection` binds mail jobs to the caller's existing
   `CollectionDefinition`; `action` yields the insert for the caller's own
@@ -75,9 +76,10 @@ Support Desk.
   terminal retention.
 - The package has local README/LICENSE, prepack build, test exclusion, exact
   release inventory, pack/import smoke verification, exact-integrity registry
-  decisions, Node 22/24 CI, and a minimal OIDC publisher. Version `0.0.0` is
-  accepted only by a separate manual bootstrap mode that never publishes
-  automatically; every `0.0.x` version is rejected by the normal OIDC lane.
+  decisions, Node 22/24 CI, and a minimal OIDC publisher. Version `0.1.0` is
+  the first supported release accepted by the normal lane. Version `0.0.0`
+  remains accepted only by a separate manual bootstrap mode that never
+  publishes automatically.
 
 ## Next phases
 
@@ -95,12 +97,12 @@ Keep ticket-specific content, Message-ID/threading, callback receipt storage,
 and provider authentication there. Run its existing mail tests as the
 migration conformance bar.
 
-### Phase 3 — package bootstrap and first advertised release
+### Phase 3 — first advertised release
 
-Bootstrap the npm package name from a protected signed `v0.0.0` source tag
-using the exact manually verified tarball. Configure npm trusted publishing
-immediately afterward, then publish the reviewed `0.1.0` release through OIDC
-so `latest` advertises a supported version.
+Keep the package-name bootstrap isolated at the protected signed `v0.0.0`
+source tag and exact manually verified tarball. After that one-time prerequisite,
+publish the reviewed `0.1.0` artifact from its own protected signed tag through
+OIDC so `latest` advertises the supported scan-based release.
 
 ## Non-goals
 

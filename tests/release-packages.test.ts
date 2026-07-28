@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -157,6 +157,27 @@ async function writeReleaseRepositoryFixture(
     writeFile(
       join(packageDirectory, "LICENSE"),
       readFileSync(join(sourceRoot, "packages", "mail", "LICENSE"), "utf8"),
+    ),
+  ]);
+  return directory;
+}
+
+async function writeBootstrapRepositoryFixture(directory: string) {
+  const sourceRoot = process.cwd();
+  await writeReleaseRepositoryFixture(directory, "0.0.0");
+  await Promise.all([
+    writeFile(
+      join(directory, "tsconfig.json"),
+      readFileSync(join(sourceRoot, "tsconfig.json"), "utf8"),
+    ),
+    writeFile(
+      join(directory, "tsconfig.base.json"),
+      readFileSync(join(sourceRoot, "tsconfig.base.json"), "utf8"),
+    ),
+    cp(
+      join(sourceRoot, "packages", "mail", "src"),
+      join(directory, "packages", "mail", "src"),
+      { recursive: true },
     ),
   ]);
   return directory;
@@ -394,26 +415,39 @@ describe("release package metadata", () => {
   );
 
   it("rejects every 0.0.x version from normal release paths", async () => {
-    await expect(
-      validateRepository({
-        releaseTag: "v0.0.0",
-        requireReleaseTag: true,
-        expectedReleaseCommit: "0".repeat(40),
-      }),
-    ).rejects.toThrow("require version 0.1.0 or later");
-    await expect(prepareRelease()).rejects.toThrow(
-      "require version 0.1.0 or later",
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-bootstrap-boundary-test-"),
     );
-    await expect(checkRegistry()).rejects.toThrow(
-      "require version 0.1.0 or later",
-    );
+    const root = join(directory, "repository");
+    try {
+      await writeReleaseRepositoryFixture(root, "0.0.0");
+      await expect(
+        validateRepository({
+          root,
+          releaseTag: "v0.0.0",
+          requireReleaseTag: true,
+          expectedReleaseCommit: "0".repeat(40),
+        }),
+      ).rejects.toThrow("require version 0.1.0 or later");
+      await expect(
+        prepareRelease({ root, output: join(directory, "release") }),
+      ).rejects.toThrow("require version 0.1.0 or later");
+      await expect(checkRegistry({ root })).rejects.toThrow(
+        "require version 0.1.0 or later",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts the advertised 0.1.0 repository from the release CLI", () => {
     const cli = spawnSync(
       process.execPath,
       [join(process.cwd(), "scripts", "release-packages.mjs"), "check"],
       { cwd: process.cwd(), encoding: "utf8" },
     );
-    expect(cli.status).not.toBe(0);
-    expect(cli.stderr).toContain("require version 0.1.0 or later");
+    expect(cli.status).toBe(0);
+    expect(cli.stdout).toContain("Release metadata is valid.");
   });
 
   it.each(["0.0.0", "0.0.1", "0.0.999"])(
@@ -569,17 +603,31 @@ describe("release package metadata", () => {
   });
 
   it("requires the prepared artifact for every bootstrap registry decision", async () => {
-    await expect(checkBootstrapRegistry()).rejects.toThrow(
-      "require an exact prepared manifest",
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-bootstrap-registry-test-"),
     );
+    const root = join(directory, "repository");
+    try {
+      await writeReleaseRepositoryFixture(root, "0.0.0");
+      await expect(checkBootstrapRegistry({ root })).rejects.toThrow(
+        "require an exact prepared manifest",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("prepares and verifies only the exact bootstrap artifact", async () => {
     const directory = await mkdtemp(
-      join(tmpdir(), "pegma-mail-bootstrap-test-"),
+      join(process.cwd(), "node_modules", ".pegma-mail-bootstrap-test-"),
     );
+    const root = join(directory, "repository");
     try {
-      const prepared = await prepareBootstrap({ output: directory });
+      await writeBootstrapRepositoryFixture(root);
+      const prepared = await prepareBootstrap({
+        root,
+        output: join(directory, "output"),
+      });
       const record = prepared.manifest as {
         package: { integrity: string };
       };
@@ -666,15 +714,15 @@ describe("release package metadata", () => {
         process.env["NPM_AUTH_TOKEN"] = "must-not-leak";
         process.env["FAKE_NPM_INTEGRITY"] = "absent";
         await expect(
-          checkBootstrapRegistry({ manifest: prepared.manifestPath }),
+          checkBootstrapRegistry({ root, manifest: prepared.manifestPath }),
         ).resolves.toBe("publish");
         process.env["FAKE_NPM_INTEGRITY"] = record.package.integrity;
         await expect(
-          checkBootstrapRegistry({ manifest: prepared.manifestPath }),
+          checkBootstrapRegistry({ root, manifest: prepared.manifestPath }),
         ).resolves.toBe("skip");
         process.env["FAKE_NPM_INTEGRITY"] = "sha512-different";
         await expect(
-          checkBootstrapRegistry({ manifest: prepared.manifestPath }),
+          checkBootstrapRegistry({ root, manifest: prepared.manifestPath }),
         ).rejects.toThrow("different tarball integrity");
       } finally {
         if (originalNpmExecPath === undefined) {
@@ -698,8 +746,10 @@ describe("release package metadata", () => {
 
   it("isolates the complete preparation from hostile npm configuration", async () => {
     const directory = await mkdtemp(
-      join(tmpdir(), "pegma-mail-preparation-isolation-"),
+      join(process.cwd(), "node_modules", ".pegma-mail-preparation-isolation-"),
     );
+    const root = join(directory, "repository");
+    await writeBootstrapRepositoryFixture(root);
     const npmExecPath = reviewedNpmExecPath();
     expect(existsSync(npmExecPath)).toBe(true);
     const version = spawnSync(process.execPath, [npmExecPath, "--version"], {
@@ -789,6 +839,7 @@ describe("release package metadata", () => {
       process.env["npm_execpath"] = npmExecPath;
       for (const key of environmentKeys.slice(1)) delete process.env[key];
       const normal = await prepareBootstrap({
+        root,
         output: join(directory, "normal"),
         registry: safe.url,
       });
@@ -800,6 +851,7 @@ describe("release package metadata", () => {
       process.env["NPM_TOKEN"] = "must-not-leak";
       process.env["NPM_AUTH_TOKEN"] = "must-not-leak";
       const isolated = await prepareBootstrap({
+        root,
         output: join(directory, "isolated"),
         registry: safe.url,
       });
@@ -929,6 +981,56 @@ describe("release package metadata", () => {
     const installDependencies = workflow.indexOf("run: npm ci");
     expect(installNpm).toBeGreaterThan(-1);
     expect(installNpm).toBeLessThan(installDependencies);
+  });
+
+  it("forces deterministic LF text checkouts even when autocrlf is enabled", () => {
+    expect(readFileSync(join(process.cwd(), ".gitattributes"), "utf8")).toBe(
+      [
+        "* text=auto eol=lf",
+        "",
+        "*.png binary",
+        "*.jpg binary",
+        "*.jpeg binary",
+        "*.gif binary",
+        "*.webp binary",
+        "",
+      ].join("\n"),
+    );
+    const text = spawnSync(
+      "git",
+      [
+        "-c",
+        "core.autocrlf=true",
+        "check-attr",
+        "eol",
+        "text",
+        "--",
+        "README.md",
+        "packages/mail/package.json",
+      ],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    expect(text.status).toBe(0);
+    for (const path of ["README.md", "packages/mail/package.json"]) {
+      expect(text.stdout).toContain(`${path}: eol: lf`);
+      expect(text.stdout).toContain(`${path}: text: auto`);
+    }
+    const binary = spawnSync(
+      "git",
+      [
+        "-c",
+        "core.autocrlf=true",
+        "check-attr",
+        "binary",
+        "text",
+        "--",
+        "release-art.png",
+      ],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    expect(binary.status).toBe(0);
+    expect(binary.stdout).toContain("release-art.png: binary: set");
+    expect(binary.stdout).toContain("release-art.png: text: unset");
   });
 
   it("pins every manual bootstrap registry operation to npmjs", () => {

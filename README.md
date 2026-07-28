@@ -10,9 +10,11 @@ caller collection through the storage adapter's authoritative cross-partition
 scan and confirms every claim against the current record. There is no
 separately persisted post-commit hint that a crash can lose.
 
-The `0.0.0` bootstrap is implemented and restricted to the one-time,
-manual-only npm package-name bootstrap procedure. The normal OIDC release lane
-rejects every `0.0.x` version and begins at `0.1.0`. The component was extracted
+`@pegma/mail@0.1.0` is the first advertised supported release. It uses the
+storage adapter's authoritative scan contract, so discovery remains attached
+to the caller row committed in the originating transaction. Version `0.0.0`
+remains restricted to the one-time, manual-only npm package-name bootstrap;
+the normal OIDC lane rejects every `0.0.x` version. The component was extracted
 from production-shaped outbound behavior in Support Desk after Identity became
 the second concrete consumer.
 
@@ -45,4 +47,5 @@ deduplication, inbound mail, campaigns, and deliverability/DNS configuration
 belong to hosts or other components.
 
 See [Architecture](docs/ARCHITECTURE.md), [Project Plan](docs/PROJECT_PLAN.md),
-and [Releasing](docs/RELEASING.md).
+[Release Notes](docs/RELEASE_NOTES.md), and
+[Releasing](docs/RELEASING.md).
