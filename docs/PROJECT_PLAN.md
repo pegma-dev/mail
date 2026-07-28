@@ -20,7 +20,7 @@ Support Desk.
 **Package:** `@pegma/mail` at bootstrap version `0.0.0`
 
 **Dependencies:** exactly `@pegma/spine@0.1.1` and
-`@pegma/storage-core@0.3.0`
+`@pegma/storage-core@0.4.0`
 
 ## Delivered bootstrap
 
@@ -45,10 +45,11 @@ Support Desk.
   reconciliation becomes explicit `terminal_unknown`.
 - Provider and preparation results are copied from own data properties without
   invoking accessors.
-- Persisted jobs, callbacks, candidates, and projection keys are normalized
-  from own data properties; projection updates merge the previous caller row
-  and must round-trip the exact job. Sendable states cannot retain provider
-  acceptance evidence, and persisted chronology must be internally consistent.
+- Persisted jobs, callbacks, adapter-reported scan keys, and projection keys are
+  normalized from own data properties; projection updates merge the previous
+  caller row and must round-trip the exact job. Sendable states cannot retain
+  provider acceptance evidence, and persisted chronology must be internally
+  consistent.
 - A trusted clock is sampled after awaited provider work. Provider event time
   is retained as evidence and never drives retries or terminal retention.
   Callback time cannot precede persisted operational history.
@@ -57,14 +58,21 @@ Support Desk.
 - Authenticated delivery callbacks may resolve late `terminal_unknown` jobs or
   ambiguous same-generation dead-letters. They clear prior acknowledgement
   and fence concurrent retention; delivered jobs never regress.
-- Retention consumes at most a configured number of host-owned candidate
-  hints, re-reads each authoritative row, and uses `deleteIfUnchanged`; it
-  never materializes a shared partition. Delivered work can expire
-  automatically; dead-letter and terminal-unknown work first require explicit
-  acknowledgement.
-- Tests cover the in-memory reference store and real Azurite, including
-  transaction refusal, lease recovery, send-versus-reconcile fencing,
-  malformed provider objects, callback monotonicity, and retention.
+- Send, reconciliation, and terminal discovery use bounded, cross-partition
+  `CollectionStore.scan` pages issued by the storage adapter. There is no
+  host-attached source or separately persisted post-commit hint. Mail passes
+  opaque cursors through unchanged; claims still decide against the current
+  row, so replay after a crash is safe.
+- Retention uses each scan row's physical key and version with
+  `deleteIfUnchanged`; it never materializes a shared partition. Delivered work
+  can expire automatically; dead-letter and terminal-unknown work first require
+  explicit acknowledgement.
+- Tests cover the in-memory reference store and real Azurite, including a crash
+  immediately after the caller transaction, an uncommitted phantom, repeated
+  pages, strict page bounds, complete-cycle cursor fairness, live-prefix
+  insertion, transaction refusal, lease recovery, send-versus-reconcile
+  fencing, malformed provider objects, callback monotonicity, and conditional
+  terminal retention.
 - The package has local README/LICENSE, prepack build, test exclusion, exact
   release inventory, pack/import smoke verification, exact-integrity registry
   decisions, Node 22/24 CI, and a minimal OIDC publisher. Version `0.0.0` is
@@ -76,8 +84,9 @@ Support Desk.
 ### Phase 1 — first consumer integration
 
 Wire Identity's enrollment and recovery sends into its own collection and
-transaction. The host supplies candidate discovery, rendering, provider
-adapters, callback authentication/deduplication, and scheduling.
+transaction. The host supplies cursor scheduling, rendering, provider adapters,
+and callback authentication/deduplication; the storage adapter supplies
+authoritative discovery.
 
 ### Phase 2 — Support Desk migration
 

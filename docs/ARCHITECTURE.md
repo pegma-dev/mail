@@ -35,7 +35,7 @@ terminal_unknown --late authenticated delivered callback--> delivered
 dead_letter --same-generation authenticated delivered callback--> delivered
 ```
 
-Sending and reconciliation have separate candidate sources and states. Every
+Sending and reconciliation have separate discovery lanes and states. Every
 claim mints a UUID fencing token. Completion requires the worker ID and exact
 token. An expired reconciliation lease remains reconciliation-only; sending
 cannot turn uncertainty into a blind resend.
@@ -51,9 +51,27 @@ the reconciliation port for provider state.
 
 ## Ports and trust
 
-Candidate sources are host-specific durable hints so mail never scans a shared
-caller partition. Repeated, late, or stale candidates are safe; an
-authoritative record decision determines eligibility.
+Discovery is the storage adapter's `CollectionStore.scan` over the
+caller-owned collection. It is not a structural host port and accepts no
+host-attached consistency marker. The adapter reports bounded pages of decoded
+records together with their physical keys, versions, and an opaque
+collection-scoped cursor. A separately persisted post-commit hint is
+forbidden: the caller transaction can commit and the process can crash before
+writing the hint, stranding must-not-be-lost work.
+
+`runSendPage`, `runReconciliationPage`, and terminal `sweep` pass cursors
+through without interpreting them. The scheduler persists `nextCursor` only
+after a whole page completes. A crash before that save repeats the page, which
+authoritative claims and version-conditional deletion make safe. The adapter
+promises no filter, order, or snapshot. A row written behind the cursor may
+wait until the next cycle, so schedulers follow the cursor through `null` and
+then restart from an omitted cursor. Repeated complete cycles provide
+liveness. Sending, reconciliation, and terminal sweeping each maintain their
+own cursor cycle.
+
+Mail validates every physical scan key against both the decoded collection key
+and the mail projection. Claims still use `update` deciders that re-read the
+current row; discovery never authorizes a state transition.
 
 Jobs hold generic `recipientRef` and `contentRef` values. The host preparation
 port resolves those references into provider-neutral content after claiming.
@@ -97,10 +115,11 @@ the completion sample. Callback processing rejects a clock sample before
 persisted creation, acceptance, or terminal time. Provider `occurredAt`
 remains evidence only.
 
-Persisted jobs, callback inputs, candidates, and projection keys are copied
-from own data properties and fully normalized before decisions or external
-calls. Accessors are never invoked. Malformed non-mail collisions are skipped;
-a malformed value that claims to be a mail job is surfaced as corruption.
+Persisted jobs, callback inputs, adapter-reported physical keys, and projection
+keys are copied from own data properties and fully normalized before decisions
+or external calls. Accessors are never invoked. Malformed non-mail collisions
+are skipped; a malformed value that claims to be a mail job is surfaced as
+corruption.
 Normalization rejects sendable states carrying provider acceptance evidence
 and operational timestamps that precede creation or prior accepted, delivered,
 or terminal state.
@@ -111,13 +130,12 @@ Send attempts use bounded exponential delay and a maximum of 20 configured
 attempts. Exhaustion produces durable `dead_letter`. Unresolvable provider
 state produces durable `terminal_unknown`. Neither is automatically replayed.
 
-Terminal retention pulls at most the caller-specified number of hints from a
-host-owned candidate source. It never lists or materializes the shared caller
-partition. Every candidate is re-read and normalized from the authoritative
-record before conditional deletion. Stale, duplicate, wrong-partition, and
-wrong-reference hints are harmless. Exhausting the pull budget reports
-`more: true` conservatively because the package does not claim knowledge of
-source exhaustion.
+Terminal retention examines at most the caller-specified scan page size across
+the caller-owned collection. Mail itself never materializes a shared
+partition. Eligible rows are deleted with the adapter-reported physical key and
+version through `deleteIfUnchanged`. Stale, repeated, wrong-reference, and
+decoded-key collision results are harmless or surfaced as corruption.
+`nextCursor` continues the current cycle; a lost cursor repeats work safely.
 
 Delivered jobs can be swept after the caller's time bound. `dead_letter` and
 `terminal_unknown` require a separate explicit acknowledgement before becoming

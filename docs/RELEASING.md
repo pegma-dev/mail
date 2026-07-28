@@ -46,8 +46,6 @@ content used by the workflow as `RELEASE_ALLOWED_SIGNERS`:
 git checkout --detach refs/tags/v0.0.0
 git fetch --no-tags origin main:refs/remotes/origin/main
 npm install --global npm@11.18.0 --registry https://registry.npmjs.org/
-export RELEASE_TAG=v0.0.0
-export RELEASE_COMMIT="$(git rev-parse HEAD)"
 test -n "${RELEASE_ALLOWED_SIGNERS}"
 test -z "${NODE_AUTH_TOKEN:-}"
 test -z "${NPM_TOKEN:-}"
@@ -74,6 +72,8 @@ npm_public ci
 npm_public run format:check
 npm_public run check
 npm_public test
+export RELEASE_TAG=v0.0.0
+export RELEASE_COMMIT="$(git rev-parse HEAD)"
 npm_public run bootstrap:pack -- -- --require-clean --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --output .bootstrap-release
 npm_public run bootstrap:verify -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
 npm_public run bootstrap:registry -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
@@ -156,6 +156,11 @@ enforce the same `>=0.1.0` boundary.
 The preparation job has no OIDC authority. It verifies the signer, tag,
 release-event commit, main ancestry, complete gate, package inventory,
 dependencies, audit, npm hashes, and clean-consumer import. It packs once.
+
+The ordinary format, type, and test gate runs before `RELEASE_TAG`,
+`RELEASE_PRERELEASE`, and `RELEASE_COMMIT` are introduced. Those release-event
+variables are scoped only to the immediately following pack step, so a tagged
+workflow cannot change the meaning of repository tests.
 
 Only the final environment-scoped job receives `id-token: write`. It installs
 no dependencies and publishes the exact prepared tarball with provenance.

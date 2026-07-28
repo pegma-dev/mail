@@ -17,7 +17,6 @@ import {
   type MailCandidate,
   type MailJob,
   type MailProjection,
-  type MailTerminalCandidateSource,
 } from "./index.js";
 
 async function pending() {
@@ -25,15 +24,6 @@ async function pending() {
   const records = store.collection(hostRecords);
   await records.transact(candidate.partition, [mailAction()]);
   return records;
-}
-
-function terminalCandidates(
-  ...candidates: readonly MailCandidate[]
-): MailTerminalCandidateSource {
-  let index = 0;
-  return {
-    next: async () => candidates[index++] ?? null,
-  };
 }
 
 function worker(
@@ -57,8 +47,6 @@ function workerFor(
     },
     reconciliation: unknownReconciliation,
     preparation,
-    sendCandidates: { next: async () => null },
-    reconciliationCandidates: { next: async () => null },
     ...overrides,
   });
 }
@@ -114,6 +102,127 @@ describe("@pegma/mail", () => {
     expect(
       (await records.list(candidate.partition)).map((row) => row.kind),
     ).toEqual(expect.arrayContaining(["state", "mail"]));
+  });
+
+  it("discovers a committed job after immediate process loss and ignores a precommit phantom", async () => {
+    const store = createMemoryStore();
+    const records = store.collection(hostRecords);
+    const send = vi.fn(async () => ({ providerMessageRef: "provider-crash" }));
+    const projected = mailAction();
+
+    setTestTime("2026-07-27T12:00:01.000Z");
+    expect(
+      await worker(records, { provider: { send } }).runSendPage({
+        limit: 100,
+      }),
+    ).toEqual({ examined: 0, results: [], nextCursor: null });
+    expect(send).not.toHaveBeenCalled();
+
+    expect(
+      (
+        await records.transact(candidate.partition, [
+          {
+            action: "insert",
+            value: {
+              kind: "state",
+              partition: candidate.partition,
+              id: "identity-enrollment",
+              value: "committed",
+            },
+          },
+          projected,
+        ])
+      ).committed,
+    ).toBe(true);
+
+    const restarted = worker(records, { provider: { send } });
+    expect(
+      (await restarted.runSendPage({ limit: 100 })).results.map(
+        (result) => result.status,
+      ),
+    ).toEqual(["accepted"]);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("replays a scan page after cursor-save loss without duplicating provider work", async () => {
+    const records = await pending();
+    const send = vi.fn(async () => ({ providerMessageRef: "provider-once" }));
+    const delivery = worker(records, { provider: { send } });
+
+    setTestTime("2026-07-27T12:00:01.000Z");
+    const completed = await delivery.runSendPage({ limit: 100 });
+    expect(completed.results.map((result) => result.status)).toEqual([
+      "accepted",
+    ]);
+    // Simulate a crash before saving completed.nextCursor: restart from the
+    // same omitted cursor and replay the authoritative row.
+    const replayed = await delivery.runSendPage({ limit: 100 });
+    expect(replayed.results.map((result) => result.status)).toEqual([
+      "not_claimed",
+    ]);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("advances a fair bounded cursor cycle and finds a live-prefix insert by the next cycle", async () => {
+    const store = createMemoryStore();
+    const records = store.collection(hostRecords);
+    for (const [partition, id] of [
+      ["account-m", "middle"],
+      ["account-z", "last"],
+    ] as const) {
+      await records.transact(partition, [
+        mail.action({
+          partition,
+          id,
+          recipientRef: `principal:${id}`,
+          contentRef: `content:${id}`,
+          createdAt: "2026-07-27T12:00:00.000Z",
+        }),
+      ]);
+    }
+    const send = vi.fn(async () => ({
+      providerMessageRef: crypto.randomUUID(),
+    }));
+    const delivery = worker(records, { provider: { send } });
+    const accepted = new Set<string>();
+    let insertedLivePrefix = false;
+
+    const runCycle = async () => {
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const page = await delivery.runSendPage({
+          limit: 1,
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        expect(page.examined).toBeLessThanOrEqual(1);
+        for (const result of page.results) {
+          if (result.status === "accepted") accepted.add(result.job.id);
+        }
+        pages += 1;
+        if (!insertedLivePrefix) {
+          insertedLivePrefix = true;
+          await records.transact("000-live-prefix", [
+            mail.action({
+              partition: "000-live-prefix",
+              id: "live-prefix",
+              recipientRef: "principal:live-prefix",
+              contentRef: "content:live-prefix",
+              createdAt: "2026-07-27T12:00:00.000Z",
+            }),
+          ]);
+        }
+        cursor = page.nextCursor ?? undefined;
+        if (pages > 10) throw new Error("mail scan cycle did not terminate");
+      } while (cursor !== undefined);
+    };
+
+    setTestTime("2026-07-27T12:00:01.000Z");
+    await runCycle();
+    await runCycle();
+
+    expect([...accepted].sort()).toEqual(["last", "live-prefix", "middle"]);
+    expect(send).toHaveBeenCalledTimes(3);
   });
 
   it("refuses an action whose caller projection does not round-trip the mail job", () => {
@@ -237,6 +346,46 @@ describe("@pegma/mail", () => {
     ).rejects.toThrow(/own data property/);
     expect(candidateReads).toBe(0);
     expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it("rejects an adapter scan key that disagrees with the decoded caller record", async () => {
+    const records = await pending();
+    const page = await records.scan({ limit: 100 });
+    const mismatched: CollectionStore<HostRecord> = {
+      ...records,
+      scan: async () => ({
+        records: page.records.map((record) => ({
+          ...record,
+          key: {
+            partition: record.key.partition,
+            id: `${record.key.id}-wrong`,
+          },
+        })),
+        nextCursor: null,
+      }),
+    };
+    const send = vi.fn(async () => ({ providerMessageRef: "never" }));
+    await expect(
+      worker(mismatched, { provider: { send } }).runSendPage({ limit: 100 }),
+    ).rejects.toThrow(/authoritative scan key/);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("rejects an overfull adapter page before provider work", async () => {
+    const records = await pending();
+    const page = await records.scan({ limit: 100 });
+    const overfull: CollectionStore<HostRecord> = {
+      ...records,
+      scan: async () => ({
+        records: [page.records[0]!, page.records[0]!],
+        nextCursor: null,
+      }),
+    };
+    const send = vi.fn(async () => ({ providerMessageRef: "never" }));
+    await expect(
+      worker(overfull, { provider: { send } }).runSendPage({ limit: 1 }),
+    ).rejects.toThrow(/requested limit/);
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("rejects numeric provider references and colliding candidate references before reconciliation or send", async () => {
@@ -491,9 +640,8 @@ describe("@pegma/mail", () => {
     );
     expect(send).toHaveBeenCalledTimes(2);
     expect(
-      await mail.sweep(records, candidate.partition, {
+      await mail.sweep(records, {
         terminalBefore: "2026-07-27T12:00:03.000Z",
-        candidates: terminalCandidates(candidate),
       }),
     ).toMatchObject({ deleted: 0 });
   });
@@ -545,9 +693,8 @@ describe("@pegma/mail", () => {
     };
 
     expect(
-      await mail.sweep(racingRecords, candidate.partition, {
+      await mail.sweep(racingRecords, {
         terminalBefore: "2026-07-27T12:00:03.500Z",
-        candidates: terminalCandidates(candidate),
       }),
     ).toMatchObject({ deleted: 0, more: true });
     expect(callbackResults).toHaveLength(1);
@@ -936,9 +1083,8 @@ describe("@pegma/mail", () => {
       ),
     ).rejects.toThrow(/precedes persisted mail operational time/);
     expect(
-      await mail.sweep(records, candidate.partition, {
+      await mail.sweep(records, {
         terminalBefore: "2026-07-27T11:30:00.000Z",
-        candidates: terminalCandidates(candidate),
       }),
     ).toMatchObject({ deleted: 0 });
     const stored = await records.get({
@@ -1082,54 +1228,37 @@ describe("@pegma/mail", () => {
     ).rejects.toThrow(/providerMessageRef/);
   });
 
-  it("bounds terminal candidate pulls and reports conservative continuation", async () => {
+  it("bounds authoritative terminal scan pages and exposes the opaque continuation", async () => {
     const records = await pending();
-    const next = vi.fn(
-      async (_request: Parameters<MailTerminalCandidateSource["next"]>[0]) => ({
-        partition: candidate.partition,
-        jobId: "stale-hint",
-      }),
-    );
-    class Source implements MailTerminalCandidateSource {
-      next(request: Parameters<MailTerminalCandidateSource["next"]>[0]) {
-        return next(request);
-      }
-    }
-    const source = new Source();
-
-    const result = await mail.sweep(records, candidate.partition, {
-      terminalBefore: "2026-07-27T12:00:03.000Z",
-      candidates: source,
-      limit: 2,
-    });
-
-    expect(next).toHaveBeenCalledTimes(2);
-    expect(next).toHaveBeenCalledWith({
+    await records.put({
+      kind: "state",
       partition: candidate.partition,
-      terminalBefore: "2026-07-27T12:00:03.000Z",
+      id: "caller-state",
+      value: "live",
     });
-    expect(result).toEqual({ examined: 2, deleted: 0, more: true });
+    const result = await mail.sweep(records, {
+      terminalBefore: "2026-07-27T12:00:03.000Z",
+      limit: 1,
+    });
+
+    expect(result).toMatchObject({ examined: 1, deleted: 0, more: true });
+    expect(typeof result.nextCursor).toBe("string");
   });
 
-  it("rejects an accessor candidate-source method without invoking it", async () => {
+  it("enforces strict storage scan page limits", async () => {
     const records = await pending();
-    let reads = 0;
-    const candidates = {
-      get next() {
-        reads += 1;
-        return async () => null;
-      },
-    };
     await expect(
-      mail.sweep(records, candidate.partition, {
+      mail.sweep(records, {
         terminalBefore: "2026-07-27T12:00:03.000Z",
-        candidates,
+        limit: 0,
       }),
-    ).rejects.toThrow(/data-property method/);
-    expect(reads).toBe(0);
+    ).rejects.toThrow(/limit/);
+    await expect(worker(records).runSendPage({ limit: 1_001 })).rejects.toThrow(
+      /limit/,
+    );
   });
 
-  it("treats stale, duplicate, and wrong-partition terminal candidates only as hints", async () => {
+  it("keeps cross-partition caller rows safe and makes terminal page replay harmless", async () => {
     const records = await pending();
     const callerState: HostRecord = {
       kind: "state",
@@ -1152,48 +1281,48 @@ describe("@pegma/mail", () => {
       testClock,
     );
 
-    const hints: Array<MailCandidate | null> = [
-      { partition: "wrong-partition", jobId: candidate.jobId },
-      { partition: candidate.partition, jobId: "stale-hint" },
-      candidate,
-      candidate,
-      null,
-    ];
-    const next = vi.fn(async () => hints.shift() ?? null);
-    expect(
-      await mail.sweep(records, candidate.partition, {
-        terminalBefore: "2026-07-27T12:00:03.000Z",
-        candidates: { next },
-        limit: 10,
+    await records.transact("other-account", [
+      mail.action({
+        partition: "other-account",
+        id: "other-mail",
+        recipientRef: "principal:other",
+        contentRef: "content:other",
+        createdAt: "2026-07-27T12:00:00.000Z",
       }),
-    ).toEqual({ examined: 4, deleted: 1, more: false });
-    expect(next).toHaveBeenCalledTimes(5);
-    expect(
-      await records.get({
-        partition: callerState.partition,
-        id: callerState.id,
-      }),
-    ).toEqual(callerState);
-
-    const directKeyMail = defineMail<HostRecord>({
-      ...hostMailProjection,
-      key: ({ partition, jobId }) => ({ partition, id: jobId }),
+    ]);
+    const completed = await mail.sweep(records, {
+      terminalBefore: "2026-07-27T12:00:03.000Z",
+      limit: 10,
+    });
+    expect(completed).toEqual({
+      examined: 3,
+      deleted: 1,
+      nextCursor: null,
+      more: false,
     });
     expect(
-      await directKeyMail.sweep(records, candidate.partition, {
+      await mail.sweep(records, {
         terminalBefore: "2026-07-27T12:00:03.000Z",
-        candidates: terminalCandidates({
-          partition: candidate.partition,
-          jobId: callerState.id,
-        }),
+        limit: 10,
       }),
-    ).toEqual({ examined: 1, deleted: 0, more: false });
+    ).toEqual({
+      examined: 2,
+      deleted: 0,
+      nextCursor: null,
+      more: false,
+    });
     expect(
       await records.get({
         partition: callerState.partition,
         id: callerState.id,
       }),
     ).toEqual(callerState);
+    expect(
+      await records.get({
+        partition: "other-account",
+        id: "mail-other-mail",
+      }),
+    ).not.toBeNull();
   });
 
   it("automates only delivered retention and requires explicit acknowledgement for uncertain terminal work", async () => {
@@ -1203,9 +1332,8 @@ describe("@pegma/mail", () => {
     await reconcileAt(delivery, "2026-07-27T12:00:02.000Z");
 
     expect(
-      await mail.sweep(records, candidate.partition, {
+      await mail.sweep(records, {
         terminalBefore: "2026-07-27T12:00:03.000Z",
-        candidates: terminalCandidates(candidate),
       }),
     ).toMatchObject({ deleted: 0 });
     expect(
@@ -1219,9 +1347,8 @@ describe("@pegma/mail", () => {
       )?.status,
     ).toBe("terminal_unknown");
     expect(
-      await mail.sweep(records, candidate.partition, {
+      await mail.sweep(records, {
         terminalBefore: "2026-07-27T12:00:04.000Z",
-        candidates: terminalCandidates(candidate),
       }),
     ).toMatchObject({ deleted: 1 });
   });
@@ -1268,9 +1395,8 @@ describe("@pegma/mail", () => {
     };
 
     expect(
-      await mail.sweep(racingRecords, candidate.partition, {
+      await mail.sweep(racingRecords, {
         terminalBefore: "2026-07-27T12:00:03.000Z",
-        candidates: terminalCandidates(candidate),
       }),
     ).toMatchObject({ deleted: 0, more: true });
     expect(
@@ -1319,11 +1445,10 @@ describe("@pegma/mail", () => {
     });
 
     await expect(
-      wrongCollectionKey.sweep(records, candidate.partition, {
+      wrongCollectionKey.sweep(records, {
         terminalBefore: "2026-07-27T12:00:03.000Z",
-        candidates: terminalCandidates(candidate),
       }),
-    ).rejects.toThrow(/authoritative projection key/);
+    ).rejects.toThrow(/projection.*key/);
     expect(
       await records.get({
         partition: candidate.partition,
@@ -1332,27 +1457,28 @@ describe("@pegma/mail", () => {
     ).toEqual(state);
   });
 
-  it("uses separate host candidate sources for sending and reconciliation", async () => {
+  it("derives separate send and reconciliation decisions from authoritative scan pages", async () => {
     const records = await pending();
-    let sendServed = false;
     const delivery = worker(records, {
       acceptedCallbackMilliseconds: 1_000,
-      sendCandidates: {
-        next: async () => {
-          if (sendServed) return null;
-          sendServed = true;
-          return candidate;
-        },
-      },
-      reconciliationCandidates: { next: async () => candidate },
     });
     setTestTime("2026-07-27T12:00:01.000Z");
-    expect((await delivery.runSendOnce())?.status).toBe("accepted");
+    expect(
+      (await delivery.runSendPage({ limit: 100 })).results.map(
+        (result) => result.status,
+      ),
+    ).toEqual(["accepted"]);
     setTestTime("2026-07-27T12:00:02.000Z");
-    expect((await delivery.runReconciliationOnce())?.status).toBe(
-      "terminal_unknown",
-    );
+    expect(
+      (await delivery.runReconciliationPage({ limit: 100 })).results.map(
+        (result) => result.status,
+      ),
+    ).toEqual(["terminal_unknown"]);
     setTestTime("2026-07-27T12:00:03.000Z");
-    expect(await delivery.runSendOnce()).toBeNull();
+    expect(
+      (await delivery.runSendPage({ limit: 100 })).results.map(
+        (result) => result.status,
+      ),
+    ).toEqual(["not_claimed"]);
   });
 });

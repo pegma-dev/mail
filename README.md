@@ -5,9 +5,10 @@ worker.
 
 It closes the lost-send gap without owning persistence: the caller projects a
 mail job into its own collection and commits the returned transaction action
-beside the state change that caused the message. The worker later consumes
-host-supplied candidate hints and confirms every claim against that
-authoritative caller record.
+beside the state change that caused the message. The worker later pages the
+caller collection through the storage adapter's authoritative cross-partition
+scan and confirms every claim against the current record. There is no
+separately persisted post-commit hint that a crash can lose.
 
 The `0.0.0` bootstrap is implemented and restricted to the one-time,
 manual-only npm package-name bootstrap procedure. The normal OIDC release lane
@@ -18,6 +19,8 @@ the second concrete consumer.
 ## Guarantees
 
 - no mail-owned store, collection, or partition;
+- no must-not-be-lost discovery outside the transaction that writes the
+  authoritative caller row;
 - mandatory provider idempotency keys;
 - bounded recorded attempts and submission generations that rotate keys only
   after authoritative failure and reuse them across ambiguous outcomes;
@@ -26,7 +29,8 @@ the second concrete consumer.
 - bounded exponential retry scheduling, dead-letter, and terminal-unknown
   outcomes;
 - accessor-safe normalization at provider boundaries;
-- full persisted-job, callback, candidate, and projection-key normalization;
+- full persisted-job, callback, physical scan-key, and projection-key
+  normalization;
 - trusted post-I/O operational timestamps, with provider time retained only as
   evidence;
 - authenticated late delivery can resolve `terminal_unknown` or an ambiguous

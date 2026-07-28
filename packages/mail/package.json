@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "@pegma/spine": "0.1.1",
-    "@pegma/storage-core": "0.3.0"
+    "@pegma/storage-core": "0.4.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
