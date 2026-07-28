@@ -53,6 +53,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
+      - name: Require an advertised release version
+        run: npm run release:check
+
       - name: Use the reviewed npm release
         run: npm install --global npm@11.18.0
 
