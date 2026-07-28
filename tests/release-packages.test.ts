@@ -291,6 +291,21 @@ describe("release package metadata", () => {
     expect(workflow).not.toContain("bootstrap:");
   });
 
+  it("installs the reviewed npm before every CI matrix gate", () => {
+    const workflow = readFileSync(
+      join(process.cwd(), ".github", "workflows", "ci.yml"),
+      "utf8",
+    );
+    expect(workflow).toContain("          - 22");
+    expect(workflow).toContain("          - 24");
+    const installNpm = workflow.indexOf(
+      "run: npm install --global npm@11.18.0",
+    );
+    const installDependencies = workflow.indexOf("run: npm ci");
+    expect(installNpm).toBeGreaterThan(-1);
+    expect(installNpm).toBeLessThan(installDependencies);
+  });
+
   it("pins every manual bootstrap registry operation to npmjs", () => {
     const instructions = readFileSync(
       join(process.cwd(), "docs", "RELEASING.md"),
