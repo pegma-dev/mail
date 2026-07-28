@@ -1,36 +1,42 @@
 # Mail
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+`@pegma/mail` is Pegma's provider-neutral transactional-mail state machine and
+worker.
 
-Transactional mail for [Pegma](https://pegma.dev) components: provider
-ports, an outbox pattern that **owns no store**, and a delivery worker with
-bounded retries and dead-lettering.
+It closes the lost-send gap without owning persistence: the caller projects a
+mail job into its own collection and commits the returned transaction action
+beside the state change that caused the message. The worker later consumes
+host-supplied candidate hints and confirms every claim against that
+authoritative caller record.
 
-> [!IMPORTANT]
-> Mail is in planning and deliberately dormant. It is created by
-> EXTRACTION — the support desk builds transactional mail in-repo first,
-> and the shared part moves here when a second consumer
-> (`@pegma/identity`) needs it. See
-> [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md).
+The `0.0.0` bootstrap is implemented but deliberately unpublishable. It was
+extracted from the production-shaped outbound behavior in Support Desk after
+Identity became the second concrete consumer.
 
-## The defining refusal
+## Guarantees
 
-A verification email that can be lost between the state change and the
-send is the failure this component exists to close — so the outbox row
-must commit **in the caller's own transaction**. Storage-core transactions
-are scoped to one collection and one partition; therefore this package
-owns **no collection, no partition, no store**. Like
-[`@pegma/audit`](https://github.com/pegma-dev/audit), it hands the caller a
-`TransactionAction` to include in its own `transact`, and its delivery
-worker operates over the caller's collections. A mail package with its own
-outbox would be architecturally incapable of the atomicity it advertised.
+- no mail-owned store, collection, or partition;
+- mandatory provider idempotency keys;
+- bounded recorded attempts and submission generations that rotate keys only
+  after authoritative failure and reuse them across ambiguous outcomes;
+- separate UUID-fenced sending and reconciliation lanes;
+- provider acceptance is not confirmed delivery;
+- bounded exponential retry scheduling, dead-letter, and terminal-unknown
+  outcomes;
+- accessor-safe normalization at provider boundaries;
+- full persisted-job, callback, candidate, and projection-key normalization;
+- trusted post-I/O operational timestamps, with provider time retained only as
+  evidence;
+- authenticated late delivery can resolve `terminal_unknown` or an ambiguous
+  same-generation `dead_letter`, while delivered state never regresses;
+- automatic retention only for delivered work; dead-letter and
+  terminal-unknown work require explicit acknowledgement.
 
-The rest follows: at-least-once toward the provider with mandatory
-idempotency keys, lease-based claiming via `update` deciders, bounded
-retries, and dead jobs kept as durable human-visible rows — never silent
-drops, never infinite retry storms. Inbound mail, bulk/marketing sending,
-rich templating, and deliverability magic are all out of scope on purpose.
+## Deliberate exclusions
 
-## License
+Provider SDKs, templates, branded rendering, webhook authentication and receipt
+deduplication, inbound mail, campaigns, and deliverability/DNS configuration
+belong to hosts or other components.
 
-MIT © RetireGolden, LLC
+See [Architecture](docs/ARCHITECTURE.md), [Project Plan](docs/PROJECT_PLAN.md),
+and [Releasing](docs/RELEASING.md).
