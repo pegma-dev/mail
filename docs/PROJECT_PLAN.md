@@ -2,12 +2,15 @@
 
 ## Status
 
-**Stage:** first advertised supported release published
-(`@pegma/mail@0.1.0`) from the protected, signed annotated `v0.1.0` tag
-through the environment-protected GitHub trusted-publishing/OIDC workflow,
-with npm SLSA provenance. The earlier `0.0.0` package-name bootstrap was the
-one-time manual prerequisite; it remains isolated and non-advertised rather
-than part of the normal release lane.
+**Stage:** Phases 1–3 are complete. `@pegma/mail@0.1.0` is published and is
+composed by both Identity and Support Desk. The public API remains unstable.
+
+The first advertised supported release was published from the protected,
+signed annotated `v0.1.0` tag through the environment-protected GitHub
+trusted-publishing/OIDC workflow, with npm SLSA provenance. The earlier
+`0.0.0` package-name bootstrap was the one-time manual prerequisite; it
+remains isolated and non-advertised rather than part of the normal release
+lane.
 
 **Trigger:** fired on 2026-07-27. Support Desk supplied a stabilized generic
 outbound state machine and Identity supplied the second real consumer:
@@ -84,28 +87,41 @@ Support Desk.
   remains accepted only by a separate manual bootstrap mode that never
   publishes automatically.
 
-## Next phases
+## Delivery phases
 
-### Phase 1 — first consumer integration
+### Phase 1 — first consumer integration ✓
 
 Wire Identity's enrollment and recovery sends into its own collection and
 transaction. The host supplies cursor scheduling, rendering, provider adapters,
 and callback authentication/deduplication; the storage adapter supplies
 authoritative discovery.
 
-### Phase 2 — Support Desk migration
+**Complete.** Identity owns the operation/Mail union that commits code state
+and delivery intent atomically. pegma.dev supplies the scheduled cursor,
+rendering, Resend adapter, and callback/acknowledgement boundary.
+
+### Phase 2 — Support Desk migration ✓
 
 Replace Support Desk's duplicated generic state machine with `@pegma/mail`.
 Keep ticket-specific content, Message-ID/threading, callback receipt storage,
 and provider authentication there. Run its existing mail tests as the
 migration conformance bar.
 
-### Phase 3 — first advertised release
+**Complete.** [Support Desk PR #2](https://github.com/pegma-dev/support-desk/pull/2)
+replaced the duplicated state machine with exact `@pegma/mail@0.1.0` while
+retaining ticket-specific projection, templates, threading, and authenticated
+callback receipt handling.
+
+### Phase 3 — first advertised release ✓
 
 Keep the package-name bootstrap isolated at the protected signed `v0.0.0`
 source tag and exact manually verified tarball. After that one-time prerequisite,
 publish the reviewed `0.1.0` artifact from its own protected signed tag through
 OIDC so `latest` advertises the supported scan-based release.
+
+**Complete.** The signed `v0.1.0` release published the reviewed artifact
+through trusted-publisher OIDC with provenance. npm `latest` resolves to
+`0.1.0`; the bootstrap artifact remains non-advertised.
 
 ## Non-goals
 
