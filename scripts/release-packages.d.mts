@@ -20,6 +20,7 @@ export function parseArguments(
 export function validateRepository(
   options?: ValidationOptions,
 ): Promise<unknown>;
+export function verifyPreparedManifest(path: string): Promise<unknown>;
 export function validateReleaseTag(options?: ValidationOptions): {
   headCommit: string;
   releaseTag: string;

@@ -440,14 +440,18 @@ export async function checkRegistry(options = {}) {
   return decidePublication(prepared.package.integrity, registry);
 }
 
-async function verifyPreparedManifest(path) {
+export async function verifyPreparedManifest(path) {
   const prepared = await readJson(path);
   const record = prepared.package;
   if (
     prepared.schemaVersion !== 1 ||
     !/^[0-9a-f]{40,64}$/u.test(prepared.gitCommit) ||
+    record === null ||
+    typeof record !== "object" ||
+    Array.isArray(record) ||
     prepared.releaseTag !== `v${record?.version}` ||
     record?.name !== PACKAGE.name ||
+    typeof record.version !== "string" ||
     !STABLE_SEMVER.test(record.version) ||
     record.version === BOOTSTRAP_VERSION ||
     typeof record.integrity !== "string" ||

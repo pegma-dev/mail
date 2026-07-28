@@ -10,6 +10,36 @@ export const TABLE_PORT = 10112;
 let child: ChildProcess | undefined;
 let workspace: string | undefined;
 
+function terminated(process: ChildProcess): boolean {
+  return process.exitCode !== null || process.signalCode !== null;
+}
+
+function waitForTermination(
+  process: ChildProcess,
+  timeoutMilliseconds: number,
+): Promise<boolean> {
+  if (terminated(process)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (didTerminate: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      process.off("exit", onTermination);
+      process.off("close", onTermination);
+      resolve(didTerminate);
+    };
+    const onTermination = () => finish(true);
+    const timer = setTimeout(
+      () => finish(terminated(process)),
+      timeoutMilliseconds,
+    );
+    process.once("exit", onTermination);
+    process.once("close", onTermination);
+    if (terminated(process)) finish(true);
+  });
+}
+
 function accepting(): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = connect({ port: TABLE_PORT, host: "127.0.0.1" });
@@ -60,10 +90,23 @@ export async function setup(): Promise<void> {
 }
 
 export async function teardown(): Promise<void> {
-  child?.kill();
+  const running = child;
   child = undefined;
-  if (workspace !== undefined) {
-    await rm(workspace, { recursive: true, force: true });
-    workspace = undefined;
+  if (running !== undefined && !terminated(running)) {
+    running.kill();
+    if (!(await waitForTermination(running, 5_000))) {
+      running.kill("SIGKILL");
+      await waitForTermination(running, 1_000);
+    }
+  }
+  const directory = workspace;
+  workspace = undefined;
+  if (directory !== undefined) {
+    await rm(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
 }

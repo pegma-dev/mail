@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -6,6 +8,7 @@ import {
   decidePublication,
   parseArguments,
   validateRepository,
+  verifyPreparedManifest,
 } from "../scripts/release-packages.mjs";
 
 describe("release package metadata", () => {
@@ -32,6 +35,32 @@ describe("release package metadata", () => {
       }),
     ).rejects.toThrow("can never be published");
   });
+
+  it.each([undefined, null, "not-an-object"])(
+    "rejects a malformed prepared package record cleanly: %j",
+    async (packageRecord) => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "pegma-mail-manifest-test-"),
+      );
+      const path = join(directory, "package-manifest.json");
+      try {
+        await writeFile(
+          path,
+          JSON.stringify({
+            schemaVersion: 1,
+            gitCommit: "0".repeat(40),
+            releaseTag: "v1.0.0",
+            ...(packageRecord === undefined ? {} : { package: packageRecord }),
+          }),
+        );
+        await expect(verifyPreparedManifest(path)).rejects.toThrow(
+          "prepared package manifest is invalid",
+        );
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("keeps OIDC authority only in the minimal publisher job", () => {
     const workflow = readFileSync(
