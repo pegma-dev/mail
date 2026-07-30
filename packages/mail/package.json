@@ -1,6 +1,6 @@
 {
   "name": "@pegma/mail",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Durable transactional mail jobs that commit in the caller's own transaction.",
   "license": "MIT",
   "type": "module",

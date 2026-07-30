@@ -1,5 +1,25 @@
 # Release notes
 
+## 0.1.1 — security scan triage
+
+No public API, runtime dependency, or behavior change: `@pegma/mail@0.1.1` is
+byte-equivalent in surface to `0.1.0` and still requires exactly
+`@pegma/spine@0.1.1` and `@pegma/storage-core@0.4.0`.
+
+This release records the 2026-07-29 triage of `docs/securityscan.md`:
+
+- the `uuid` buffer-bounds advisory (GHSA-w5hq-g745-h8pq) is cleared from the
+  development tree by a root `overrides` pin to `^11.1.1`, with a lockfile
+  regression test; and
+- the hardcoded-emulator-key and unvalidated-recipient findings were
+  re-examined and disputed as not valid, so no source changed for either.
+
+`npm audit --omit=dev` remains 0. The residual `brace-expansion` and
+`@opentelemetry/core` advisories are development-only, are documented as
+accepted in `docs/securityscan.md` with the verified reason each patched
+release is API-incompatible with azurite's pinned tree, and never reach a
+published artifact.
+
 ## 0.1.0 — first advertised supported release
 
 Status: prepared for reviewed merge, a protected signed annotated `v0.1.0`
