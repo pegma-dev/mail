@@ -376,6 +376,31 @@ describe("release package metadata", () => {
     });
   });
 
+  it("keeps every resolved uuid past the buffer-bounds advisory", () => {
+    const rootManifest = JSON.parse(
+      readFileSync(join(process.cwd(), "package.json"), "utf8"),
+    ) as { overrides: Record<string, string> };
+    expect(rootManifest.overrides).toMatchObject({ uuid: "^11.1.1" });
+
+    const lockfile = JSON.parse(
+      readFileSync(join(process.cwd(), "package-lock.json"), "utf8"),
+    ) as { packages: Record<string, { version?: string }> };
+    const resolved = Object.entries(lockfile.packages).filter(([path]) =>
+      /(?:^|\/)node_modules\/uuid$/.test(path),
+    );
+    expect(resolved.length).toBeGreaterThan(0);
+    const vulnerable = resolved.filter(([, entry]) => {
+      const [major = 0, minor = 0, patch = 0] = (entry.version ?? "0")
+        .split(".")
+        .map(Number);
+      if (major !== 11) return major < 11;
+      return minor < 1 || (minor === 1 && patch < 1);
+    });
+    expect(
+      vulnerable.map(([path, entry]) => `${path}@${entry.version}`),
+    ).toEqual([]);
+  });
+
   it("validates package metadata, exact dependencies, and lockfile together", async () => {
     const releaseTag = process.env.RELEASE_TAG;
     const releaseCommit = process.env.RELEASE_COMMIT;
