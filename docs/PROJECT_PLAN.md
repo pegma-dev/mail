@@ -2,7 +2,7 @@
 
 ## Status
 
-**Stage:** Phases 1–3 are complete. `@pegma/mail@0.1.0` is published and is
+**Stage:** Phases 1–3 are complete. `@pegma/mail@0.1.1` is published and is
 composed by both Identity and Support Desk. The public API remains unstable.
 
 The first advertised supported release was published from the protected,
