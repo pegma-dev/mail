@@ -85,9 +85,19 @@ function run(command, arguments_, options = {}) {
   return result;
 }
 
+function isPnpmCli(path) {
+  const normalized = path.replaceAll("\\", "/").toLowerCase();
+  return (
+    normalized.includes("/pnpm/") ||
+    normalized.endsWith("/pnpm") ||
+    normalized.endsWith("/pnpm.cjs") ||
+    normalized.endsWith("/pnpm.js")
+  );
+}
+
 function runNpm(arguments_, options = {}) {
   const npmExecPath = process.env.npm_execpath;
-  return npmExecPath === undefined
+  return npmExecPath === undefined || isPnpmCli(npmExecPath)
     ? run(process.platform === "win32" ? "npm.cmd" : "npm", arguments_, {
         ...options,
         shell: process.platform === "win32",
@@ -122,6 +132,35 @@ export function publicRegistryArguments(
     registry,
     `--@pegma:registry=${registry}`,
   ];
+}
+
+function runPublicRegistryPnpm(arguments_, options = {}) {
+  const { registry = PUBLIC_NPM_REGISTRY, ...runOptions } = options;
+  const configDirectory = mkdtempSync(
+    join(tmpdir(), "pegma-mail-pnpm-config-"),
+  );
+  const userConfig = join(configDirectory, "user.npmrc");
+  const globalConfig = join(configDirectory, "global.npmrc");
+  writeFileSync(
+    userConfig,
+    `registry=${registry}\n@pegma:registry=${registry}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(globalConfig, "", { mode: 0o600 });
+  try {
+    return run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", arguments_, {
+      ...runOptions,
+      cwd: runOptions.cwd ?? configDirectory,
+      env: {
+        ...isolatedNpmEnvironment(),
+        npm_config_userconfig: userConfig,
+        npm_config_globalconfig: globalConfig,
+      },
+      shell: process.platform === "win32",
+    });
+  } finally {
+    rmSync(configDirectory, { recursive: true, force: true });
+  }
 }
 
 function runPublicRegistryNpm(arguments_, options = {}) {
@@ -292,7 +331,10 @@ export async function validateRepository(options = {}) {
     !Array.isArray(manifest.files) ||
     manifest.files.length === 0 ||
     manifest.files.some((entry) => !entry.startsWith("dist/")) ||
-    !manifest.scripts?.prepack?.includes("build")
+    !(
+      manifest.scripts?.prepack?.includes("build") ||
+      manifest.scripts?.prepack?.includes("tsc")
+    )
   ) {
     fail(`${PACKAGE.name} has an unsafe package allowlist or prepack`);
   }
@@ -456,7 +498,7 @@ export async function prepareRelease(options = {}) {
   if ((await readdir(output)).length !== 0) {
     fail(`release output directory must be empty: ${output}`);
   }
-  runPublicRegistryNpm(["audit", "--omit=dev"], {
+  runPublicRegistryPnpm(["audit", "--prod"], {
     cwd: root,
     registry: options.registry,
   });

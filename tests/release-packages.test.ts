@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -55,11 +55,35 @@ async function startTestRegistry(
   };
 }
 
-function reviewedNpmExecPath() {
+function isPnpmCli(path: string) {
+  const normalized = path.replaceAll("\\", "/").toLowerCase();
   return (
-    process.env["npm_execpath"] ??
-    join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+    normalized.includes("/pnpm/") ||
+    normalized.endsWith("/pnpm") ||
+    normalized.endsWith("/pnpm.cjs") ||
+    normalized.endsWith("/pnpm.js")
   );
+}
+
+function reviewedNpmExecPath() {
+  const fromEnv = process.env["npm_execpath"];
+  if (fromEnv !== undefined && !isPnpmCli(fromEnv)) return fromEnv;
+  const bundled = join(
+    dirname(process.execPath),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  if (existsSync(bundled)) return bundled;
+  const which = spawnSync("which", ["npm"], { encoding: "utf8" });
+  const npmBin = which.stdout.trim().split("\n")[0];
+  if (which.status === 0 && npmBin !== undefined && npmBin.length > 0) {
+    const nearby = join(dirname(npmBin), "..", "npm", "bin", "npm-cli.js");
+    if (existsSync(nearby)) return nearby;
+    return npmBin;
+  }
+  return bundled;
 }
 
 function cleanNpmEnvironment() {
@@ -134,6 +158,10 @@ async function writeReleaseRepositoryFixture(
       readFileSync(join(sourceRoot, "pnpm-lock.yaml"), "utf8"),
     ),
     writeFile(
+      join(directory, "pnpm-workspace.yaml"),
+      readFileSync(join(sourceRoot, "pnpm-workspace.yaml"), "utf8"),
+    ),
+    writeFile(
       join(packageDirectory, "package.json"),
       `${JSON.stringify(packageManifest, null, 2)}\n`,
     ),
@@ -172,6 +200,10 @@ async function writeBootstrapRepositoryFixture(directory: string) {
       join(sourceRoot, "packages", "mail", "src"),
       join(directory, "packages", "mail", "src"),
       { recursive: true },
+    ),
+    symlink(
+      join(sourceRoot, "packages", "mail", "node_modules"),
+      join(directory, "packages", "mail", "node_modules"),
     ),
   ]);
   return directory;
@@ -253,7 +285,7 @@ async function startDependencyRegistry(
       "  writeFileSync(recordPath, JSON.stringify(requests));",
       '  if (request.url.startsWith("/-/npm/v1/security/")) {',
       '    response.setHeader("content-type", "application/json");',
-      '    response.end("{}");',
+      "    response.end(JSON.stringify({ actions: [], advisories: {}, muted: [], metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0 }, dependencies: 0, devDependencies: 0, optionalDependencies: 0, totalDependencies: 0 } }));",
       "    return;",
       "  }",
       '  if (request.url.startsWith("/tarballs/")) {',
@@ -380,9 +412,9 @@ describe("release package metadata", () => {
       join(process.cwd(), "pnpm-lock.yaml"),
       "utf8",
     );
-    const resolved = [...lockfile.matchAll(/^ {2}uuid@([^:( \n]+):/gm)].map(
-      (match) => match[1],
-    );
+    const resolved = [...lockfile.matchAll(/^ {2}uuid@([^:( \n]+):/gm)]
+      .map((match) => match[1])
+      .filter((version): version is string => version !== undefined);
     expect(resolved.length).toBeGreaterThan(0);
     const vulnerable = resolved.filter((version) => {
       const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
@@ -1170,15 +1202,7 @@ describe("release package metadata", () => {
         ].join("\n"),
       );
       await writeFile(globalConfig, "");
-      const npmExecPath =
-        process.env["npm_execpath"] ??
-        join(
-          dirname(process.execPath),
-          "node_modules",
-          "npm",
-          "bin",
-          "npm-cli.js",
-        );
+      const npmExecPath = reviewedNpmExecPath();
       expect(existsSync(npmExecPath)).toBe(true);
       const version = spawnSync(process.execPath, [npmExecPath!, "--version"], {
         encoding: "utf8",

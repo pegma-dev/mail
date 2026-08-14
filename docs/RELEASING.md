@@ -27,7 +27,7 @@ tag whose commit is already contained in `origin/main`. Configure:
 
 Run `pnpm run format:check`, `pnpm run check`, and `pnpm test` on Node 22 and 24.
 The packer also checks the exact two runtime dependencies, runs
-`npm audit --omit=dev`, requires the exact seven-file package inventory,
+`pnpm audit --prod`, requires the exact seven-file package inventory,
 verifies npm's SHA-1 and SHA-512 values, and imports the tarball from a clean
 consumer.
 
