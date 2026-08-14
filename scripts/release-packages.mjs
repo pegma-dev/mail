@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 const PACKAGE = { directory: "mail", name: "@pegma/mail" };
 const REPOSITORY_URL = "git+https://github.com/pegma-dev/mail.git";
 const REVIEWED_NPM_VERSION = "11.18.0";
+const REVIEWED_PACKAGE_MANAGER =
+  "pnpm@10.34.5+sha512.a4ee05f2f73658255bd6a89859c065a45c28a57daefae2c893a168ee2b73168c37b91e83e57ea67654ad03f03031746430e8bce38e362e042605fb8abc80192e";
 const PUBLIC_NPM_REGISTRY = "https://registry.npmjs.org/";
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const BOOTSTRAP_VERSION = "0.0.0";
@@ -254,14 +256,13 @@ export async function validateRepository(options = {}) {
   const packageTsconfig = await readJson(
     join(packageDirectory, "tsconfig.json"),
   );
-  const lockfile = await readJson(join(root, "package-lock.json"));
-  const lockEntry = lockfile.packages?.[`packages/${PACKAGE.directory}`];
+  const lockfile = await readFile(join(root, "pnpm-lock.yaml"), "utf8");
 
   if (
     rootManifest.private !== true ||
-    rootManifest.packageManager !== `npm@${REVIEWED_NPM_VERSION}`
+    rootManifest.packageManager !== REVIEWED_PACKAGE_MANAGER
   ) {
-    fail(`the private root must pin npm@${REVIEWED_NPM_VERSION}`);
+    fail(`the private root must pin ${REVIEWED_PACKAGE_MANAGER}`);
   }
   if (
     manifest.name !== PACKAGE.name ||
@@ -315,8 +316,11 @@ export async function validateRepository(options = {}) {
   }
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
-  if (lockEntry?.version !== manifest.version) {
-    fail(`${PACKAGE.name} version is not synchronized with package-lock.json`);
+  if (
+    !lockfile.includes(`\n  packages/${PACKAGE.directory}:\n`) &&
+    !lockfile.includes(`\n  'packages/${PACKAGE.directory}':\n`)
+  ) {
+    fail(`${PACKAGE.name} is not synchronized with pnpm-lock.yaml`);
   }
   const publicWorkspaces = [];
   for (const entry of await readdir(join(root, "packages"), {

@@ -25,7 +25,7 @@ tag whose commit is already contained in `origin/main`. Configure:
 - `RELEASE_ALLOWED_SIGNERS` with reviewed SSH allowed-signers entries; and
 - tag protection against moving or deleting `v*`.
 
-Run `npm run format:check`, `npm run check`, and `npm test` on Node 22 and 24.
+Run `pnpm run format:check`, `pnpm run check`, and `pnpm test` on Node 22 and 24.
 The packer also checks the exact two runtime dependencies, runs
 `npm audit --omit=dev`, requires the exact seven-file package inventory,
 verifies npm's SHA-1 and SHA-512 values, and imports the tarball from a clean
@@ -50,6 +50,7 @@ content used by the workflow as `RELEASE_ALLOWED_SIGNERS`:
 ```sh
 git checkout --detach refs/tags/v0.0.0
 git fetch --no-tags origin main:refs/remotes/origin/main
+corepack enable
 npm install --global npm@11.18.0 --registry https://registry.npmjs.org/
 test -n "${RELEASE_ALLOWED_SIGNERS}"
 test -z "${NODE_AUTH_TOKEN:-}"
@@ -73,15 +74,15 @@ test "$(npm_public config get @pegma:registry)" = "https://registry.npmjs.org/"
 printf '%s\n' "${RELEASE_ALLOWED_SIGNERS}" > "${allowed_signers}"
 git config --local gpg.format ssh
 git config --local gpg.ssh.allowedSignersFile "${allowed_signers}"
-npm_public ci
-npm_public run format:check
-npm_public run check
-npm_public test
+pnpm install --frozen-lockfile
+pnpm run format:check
+pnpm run check
+pnpm test
 export RELEASE_TAG=v0.0.0
 export RELEASE_COMMIT="$(git rev-parse HEAD)"
-npm_public run bootstrap:pack -- -- --require-clean --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --output .bootstrap-release
-npm_public run bootstrap:verify -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
-npm_public run bootstrap:registry -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
+pnpm run bootstrap:pack -- -- --require-clean --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --output .bootstrap-release
+pnpm run bootstrap:verify -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
+pnpm run bootstrap:registry -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
 ```
 
 The registry decision must be `publish`. Manually publish only the exact
@@ -172,8 +173,8 @@ no dependencies and publishes the exact prepared tarball with provenance.
 
 ## Registry safety
 
-`npm run release:registry` requires the current stable version to be absent.
-`npm run release:registry -- -- --manifest .release/package-manifest.json`
+`pnpm run release:registry` requires the current stable version to be absent.
+`pnpm run release:registry -- -- --manifest .release/package-manifest.json`
 allows only two retry-safe outcomes: absent means publish, and an existing
 byte-identical `dist.integrity` means skip. Different bytes or any registry
 error other than `E404` stops the release. When a prepared manifest is supplied,

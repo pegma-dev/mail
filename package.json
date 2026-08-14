@@ -5,13 +5,10 @@
   "description": "Durable transactional mail for Pegma components.",
   "license": "MIT",
   "type": "module",
-  "packageManager": "npm@11.18.0",
+  "packageManager": "pnpm@10.34.5+sha512.a4ee05f2f73658255bd6a89859c065a45c28a57daefae2c893a168ee2b73168c37b91e83e57ea67654ad03f03031746430e8bce38e362e042605fb8abc80192e",
   "engines": {
     "node": ">=22"
   },
-  "workspaces": [
-    "packages/*"
-  ],
   "scripts": {
     "build": "tsc -b",
     "check": "tsc -b --pretty false && tsc -p tsconfig.test.json --pretty false",
@@ -25,7 +22,7 @@
     "release:pack": "node scripts/release-packages.mjs pack",
     "release:registry": "node scripts/release-packages.mjs registry",
     "release:publish": "node scripts/release-packages.mjs publish",
-    "test": "npm run build && vitest run"
+    "test": "pnpm run build && vitest run"
   },
   "devDependencies": {
     "@azure/data-tables": "^13.3.1",
@@ -38,5 +35,10 @@
   },
   "overrides": {
     "uuid": "^11.1.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "uuid": "^11.1.1"
+    }
   }
 }

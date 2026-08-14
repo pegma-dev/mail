@@ -65,7 +65,7 @@ The package needs its own README and LICENSE. `prepack` must build, package
 TypeScript must exclude tests, and sibling dependencies are pinned exactly.
 
 Work on a `claude/*` branch and open a pull request. The gate is
-`npm run format:check`, `npm run check`, and `npm test` on Node 22 and 24.
+`pnpm run format:check`, `pnpm run check`, and `pnpm test` on Node 22 and 24.
 
 Stable publishing is trusted-publisher OIDC only. The sole exception is the
 first package-name bootstrap: `0.0.0` may be packed and verified only through

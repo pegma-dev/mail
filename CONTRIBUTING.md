@@ -3,10 +3,10 @@
 Mail requires Node.js 22 or newer.
 
 ```sh
-npm ci
-npm run format:check
-npm run check
-npm test
+pnpm install --frozen-lockfile
+pnpm run format:check
+pnpm run check
+pnpm test
 ```
 
 Changes must preserve caller-owned atomicity, mandatory provider idempotency,

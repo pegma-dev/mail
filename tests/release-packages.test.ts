@@ -123,21 +123,15 @@ async function writeReleaseRepositoryFixture(
   const packageManifest = JSON.parse(
     readFileSync(join(sourceRoot, "packages", "mail", "package.json"), "utf8"),
   ) as Record<string, unknown>;
-  const lockfile = JSON.parse(
-    readFileSync(join(sourceRoot, "package-lock.json"), "utf8"),
-  ) as {
-    packages: Record<string, { version?: string }>;
-  };
   packageManifest["version"] = version;
-  lockfile.packages["packages/mail"]!.version = version;
   await Promise.all([
     writeFile(
       join(directory, "package.json"),
       `${JSON.stringify(rootManifest, null, 2)}\n`,
     ),
     writeFile(
-      join(directory, "package-lock.json"),
-      `${JSON.stringify(lockfile, null, 2)}\n`,
+      join(directory, "pnpm-lock.yaml"),
+      readFileSync(join(sourceRoot, "pnpm-lock.yaml"), "utf8"),
     ),
     writeFile(
       join(packageDirectory, "package.json"),
@@ -382,23 +376,20 @@ describe("release package metadata", () => {
     ) as { overrides: Record<string, string> };
     expect(rootManifest.overrides).toMatchObject({ uuid: "^11.1.1" });
 
-    const lockfile = JSON.parse(
-      readFileSync(join(process.cwd(), "package-lock.json"), "utf8"),
-    ) as { packages: Record<string, { version?: string }> };
-    const resolved = Object.entries(lockfile.packages).filter(([path]) =>
-      /(?:^|\/)node_modules\/uuid$/.test(path),
+    const lockfile = readFileSync(
+      join(process.cwd(), "pnpm-lock.yaml"),
+      "utf8",
+    );
+    const resolved = [...lockfile.matchAll(/^ {2}uuid@([^:( \n]+):/gm)].map(
+      (match) => match[1],
     );
     expect(resolved.length).toBeGreaterThan(0);
-    const vulnerable = resolved.filter(([, entry]) => {
-      const [major = 0, minor = 0, patch = 0] = (entry.version ?? "0")
-        .split(".")
-        .map(Number);
+    const vulnerable = resolved.filter((version) => {
+      const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
       if (major !== 11) return major < 11;
       return minor < 1 || (minor === 1 && patch < 1);
     });
-    expect(
-      vulnerable.map(([path, entry]) => `${path}@${entry.version}`),
-    ).toEqual([]);
+    expect(vulnerable.map((version) => `uuid@${version}`)).toEqual([]);
   });
 
   it("validates package metadata, exact dependencies, and lockfile together", async () => {
@@ -790,14 +781,28 @@ describe("release package metadata", () => {
     const fixtures = [
       packDependencyFixture(
         npmExecPath,
-        join(process.cwd(), "node_modules", "@pegma", "spine"),
+        join(
+          process.cwd(),
+          "packages",
+          "mail",
+          "node_modules",
+          "@pegma",
+          "spine",
+        ),
         directory,
         fixtureUserConfig,
         fixtureGlobalConfig,
       ),
       packDependencyFixture(
         npmExecPath,
-        join(process.cwd(), "node_modules", "@pegma", "storage-core"),
+        join(
+          process.cwd(),
+          "packages",
+          "mail",
+          "node_modules",
+          "@pegma",
+          "storage-core",
+        ),
         directory,
         fixtureUserConfig,
         fixtureGlobalConfig,
@@ -964,7 +969,8 @@ describe("release package metadata", () => {
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
-    expect(prepare).toContain("npm run release:check");
+    expect(publish).not.toContain("pnpm install");
+    expect(prepare).toContain("pnpm run release:check");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).not.toContain("NODE_AUTH_TOKEN");
     expect(workflow).not.toContain("bootstrap:");
@@ -1000,10 +1006,13 @@ describe("release package metadata", () => {
     );
     expect(workflow).toContain("          - 22");
     expect(workflow).toContain("          - 24");
+    expect(workflow).toContain("run: corepack enable");
     const installNpm = workflow.indexOf(
       "run: npm install --global npm@11.18.0",
     );
-    const installDependencies = workflow.indexOf("run: npm ci");
+    const installDependencies = workflow.indexOf(
+      "run: pnpm install --frozen-lockfile",
+    );
     expect(installNpm).toBeGreaterThan(-1);
     expect(installNpm).toBeLessThan(installDependencies);
   });
@@ -1084,12 +1093,12 @@ describe("release package metadata", () => {
     expect(instructions).toContain(
       "npm_public publish ./.bootstrap-release/pegma-mail-0.0.0.tgz --access public --tag bootstrap",
     );
-    const testGate = instructions.indexOf("npm_public test");
+    const testGate = instructions.indexOf("pnpm test");
     const releaseTag = instructions.indexOf("export RELEASE_TAG=v0.0.0");
     const releaseCommit = instructions.indexOf(
       'export RELEASE_COMMIT="$(git rev-parse HEAD)"',
     );
-    const pack = instructions.indexOf("npm_public run bootstrap:pack");
+    const pack = instructions.indexOf("pnpm run bootstrap:pack");
     expect(testGate).toBeGreaterThan(-1);
     expect(releaseTag).toBeGreaterThan(testGate);
     expect(releaseCommit).toBeGreaterThan(releaseTag);
