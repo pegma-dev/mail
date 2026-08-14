@@ -44,13 +44,15 @@ GitHub release for this tag: a release event would invoke the OIDC workflow,
 which intentionally rejects every `0.0.x` version.
 
 Check out the exact tag, fetch protected main, install the reviewed npm, and
-prepare an empty output directory. Export the same reviewed allowed-signers
-content used by the workflow as `RELEASE_ALLOWED_SIGNERS`:
+prepare an empty output directory. The immutable `v0.0.0` source tag predates
+the pnpm conversion: it still has `package-lock.json` and
+`packageManager: npm@11.18.0`, so this tag-specific procedure keeps
+npm-compatible commands. Export the same reviewed allowed-signers content used
+by the workflow as `RELEASE_ALLOWED_SIGNERS`:
 
 ```sh
 git checkout --detach refs/tags/v0.0.0
 git fetch --no-tags origin main:refs/remotes/origin/main
-corepack enable
 npm install --global npm@11.18.0 --registry https://registry.npmjs.org/
 test -n "${RELEASE_ALLOWED_SIGNERS}"
 test -z "${NODE_AUTH_TOKEN:-}"
@@ -74,15 +76,15 @@ test "$(npm_public config get @pegma:registry)" = "https://registry.npmjs.org/"
 printf '%s\n' "${RELEASE_ALLOWED_SIGNERS}" > "${allowed_signers}"
 git config --local gpg.format ssh
 git config --local gpg.ssh.allowedSignersFile "${allowed_signers}"
-pnpm install --frozen-lockfile
-pnpm run format:check
-pnpm run check
-pnpm test
+npm_public ci
+npm_public run format:check
+npm_public run check
+npm_public test
 export RELEASE_TAG=v0.0.0
 export RELEASE_COMMIT="$(git rev-parse HEAD)"
-pnpm run bootstrap:pack -- -- --require-clean --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --output .bootstrap-release
-pnpm run bootstrap:verify -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
-pnpm run bootstrap:registry -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
+npm_public run bootstrap:pack -- -- --require-clean --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --output .bootstrap-release
+npm_public run bootstrap:verify -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
+npm_public run bootstrap:registry -- -- --require-main-ancestor --require-bootstrap-tag --expected-release-commit "${RELEASE_COMMIT}" --manifest .bootstrap-release/package-manifest.json
 ```
 
 The registry decision must be `publish`. Manually publish only the exact
@@ -147,7 +149,7 @@ Do not announce an unqualified install until that correction is visible in
 
 ## Normal OIDC releases (`0.1.0` and later)
 
-Update `packages/mail/package.json`, the lockfile, and public release notes
+Update `packages/mail/package.json`, `pnpm-lock.yaml`, and public release notes
 through a reviewed pull request. After merge, create and push a protected
 signed annotated `vX.Y.Z` tag at the exact `origin/main` commit, then run:
 

@@ -113,7 +113,11 @@ function isolatedNpmEnvironment() {
       normalized.startsWith("npm_config_") ||
       normalized === "node_auth_token" ||
       normalized === "npm_token" ||
-      normalized === "npm_auth_token"
+      normalized === "npm_auth_token" ||
+      normalized === "npm_execpath" ||
+      normalized === "npm_lifecycle_event" ||
+      normalized === "npm_lifecycle_script" ||
+      normalized === "npm_command"
     ) {
       continue;
     }
@@ -206,6 +210,54 @@ function hashTarball(bytes) {
     shasum: createHash("sha1").update(bytes).digest("hex"),
     integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
   };
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function pnpmLockDependency(lockfile, importer, name) {
+  const importerHeader = new RegExp(
+    `^  (?:'${escapeRegExp(importer)}'|${escapeRegExp(importer)}):\\n`,
+    "m",
+  );
+  const header = importerHeader.exec(lockfile);
+  if (header === null) return null;
+  const start = header.index + header[0].length;
+  const rest = lockfile.slice(start);
+  const nextImporter = rest.search(/^  [^ \n]/m);
+  const section = nextImporter === -1 ? rest : rest.slice(0, nextImporter);
+  const key = name.startsWith("@") || name.includes("/") ? `'${name}'` : name;
+  const entry = new RegExp(
+    `^      ${escapeRegExp(key)}:\\n        specifier: ([^\\n]+)\\n        version: ([^\\n]+)`,
+    "m",
+  );
+  const match = entry.exec(section);
+  if (match === null) return null;
+  return { specifier: match[1].trim(), version: match[2].trim() };
+}
+
+function requirePnpmLockDependencies(lockfile, importer, dependencies) {
+  for (const [name, specifier] of Object.entries(dependencies)) {
+    const locked = pnpmLockDependency(lockfile, importer, name);
+    if (locked === null) {
+      fail(`${name} is missing from pnpm-lock.yaml`);
+    }
+    if (locked.specifier !== specifier) {
+      fail(`${name} specifier is not synchronized with pnpm-lock.yaml`);
+    }
+    if (locked.version.length === 0) {
+      fail(`${name} resolved version is missing from pnpm-lock.yaml`);
+    }
+    if (
+      !specifier.startsWith("^") &&
+      !specifier.startsWith("~") &&
+      locked.version !== specifier &&
+      !locked.version.startsWith(`${specifier}(`)
+    ) {
+      fail(`${name} resolved version is not synchronized with pnpm-lock.yaml`);
+    }
+  }
 }
 
 function exportTargets(value) {
@@ -358,12 +410,11 @@ export async function validateRepository(options = {}) {
   }
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
-  if (
-    !lockfile.includes(`\n  packages/${PACKAGE.directory}:\n`) &&
-    !lockfile.includes(`\n  'packages/${PACKAGE.directory}':\n`)
-  ) {
-    fail(`${PACKAGE.name} is not synchronized with pnpm-lock.yaml`);
-  }
+  requirePnpmLockDependencies(
+    lockfile,
+    `packages/${PACKAGE.directory}`,
+    manifest.dependencies,
+  );
   const publicWorkspaces = [];
   for (const entry of await readdir(join(root, "packages"), {
     withFileTypes: true,

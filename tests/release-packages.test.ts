@@ -1002,6 +1002,9 @@ describe("release package metadata", () => {
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
     expect(publish).not.toContain("pnpm install");
+    expect(publish).not.toContain("corepack");
+    expect(publish).not.toContain("pnpm run");
+    expect(publish).toContain("npm run release:publish");
     expect(prepare).toContain("pnpm run release:check");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).not.toContain("NODE_AUTH_TOKEN");
@@ -1125,12 +1128,12 @@ describe("release package metadata", () => {
     expect(instructions).toContain(
       "npm_public publish ./.bootstrap-release/pegma-mail-0.0.0.tgz --access public --tag bootstrap",
     );
-    const testGate = instructions.indexOf("pnpm test");
+    const testGate = instructions.indexOf("npm_public test");
     const releaseTag = instructions.indexOf("export RELEASE_TAG=v0.0.0");
     const releaseCommit = instructions.indexOf(
       'export RELEASE_COMMIT="$(git rev-parse HEAD)"',
     );
-    const pack = instructions.indexOf("pnpm run bootstrap:pack");
+    const pack = instructions.indexOf("npm_public run bootstrap:pack");
     expect(testGate).toBeGreaterThan(-1);
     expect(releaseTag).toBeGreaterThan(testGate);
     expect(releaseCommit).toBeGreaterThan(releaseTag);
