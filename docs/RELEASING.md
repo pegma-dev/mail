@@ -25,9 +25,9 @@ tag whose commit is already contained in `origin/main`. Configure:
 - `RELEASE_ALLOWED_SIGNERS` with reviewed SSH allowed-signers entries; and
 - tag protection against moving or deleting `v*`.
 
-Run `npm run format:check`, `npm run check`, and `npm test` on Node 22 and 24.
+Run `pnpm run format:check`, `pnpm run check`, and `pnpm test` on Node 22 and 24.
 The packer also checks the exact two runtime dependencies, runs
-`npm audit --omit=dev`, requires the exact seven-file package inventory,
+`pnpm audit --prod`, requires the exact seven-file package inventory,
 verifies npm's SHA-1 and SHA-512 values, and imports the tarball from a clean
 consumer.
 
@@ -44,8 +44,11 @@ GitHub release for this tag: a release event would invoke the OIDC workflow,
 which intentionally rejects every `0.0.x` version.
 
 Check out the exact tag, fetch protected main, install the reviewed npm, and
-prepare an empty output directory. Export the same reviewed allowed-signers
-content used by the workflow as `RELEASE_ALLOWED_SIGNERS`:
+prepare an empty output directory. The immutable `v0.0.0` source tag predates
+the pnpm conversion: it still has `package-lock.json` and
+`packageManager: npm@11.18.0`, so this tag-specific procedure keeps
+npm-compatible commands. Export the same reviewed allowed-signers content used
+by the workflow as `RELEASE_ALLOWED_SIGNERS`:
 
 ```sh
 git checkout --detach refs/tags/v0.0.0
@@ -146,7 +149,7 @@ Do not announce an unqualified install until that correction is visible in
 
 ## Normal OIDC releases (`0.1.0` and later)
 
-Update `packages/mail/package.json`, the lockfile, and public release notes
+Update `packages/mail/package.json`, `pnpm-lock.yaml`, and public release notes
 through a reviewed pull request. After merge, create and push a protected
 signed annotated `vX.Y.Z` tag at the exact `origin/main` commit, then run:
 
@@ -172,8 +175,8 @@ no dependencies and publishes the exact prepared tarball with provenance.
 
 ## Registry safety
 
-`npm run release:registry` requires the current stable version to be absent.
-`npm run release:registry -- -- --manifest .release/package-manifest.json`
+`pnpm run release:registry` requires the current stable version to be absent.
+`pnpm run release:registry -- -- --manifest .release/package-manifest.json`
 allows only two retry-safe outcomes: absent means publish, and an existing
 byte-identical `dist.integrity` means skip. Different bytes or any registry
 error other than `E404` stops the release. When a prepared manifest is supplied,

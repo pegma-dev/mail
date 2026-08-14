@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 const PACKAGE = { directory: "mail", name: "@pegma/mail" };
 const REPOSITORY_URL = "git+https://github.com/pegma-dev/mail.git";
 const REVIEWED_NPM_VERSION = "11.18.0";
+const REVIEWED_PACKAGE_MANAGER =
+  "pnpm@10.34.5+sha512.a4ee05f2f73658255bd6a89859c065a45c28a57daefae2c893a168ee2b73168c37b91e83e57ea67654ad03f03031746430e8bce38e362e042605fb8abc80192e";
 const PUBLIC_NPM_REGISTRY = "https://registry.npmjs.org/";
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const BOOTSTRAP_VERSION = "0.0.0";
@@ -83,9 +85,19 @@ function run(command, arguments_, options = {}) {
   return result;
 }
 
+function isPnpmCli(path) {
+  const normalized = path.replaceAll("\\", "/").toLowerCase();
+  return (
+    normalized.includes("/pnpm/") ||
+    normalized.endsWith("/pnpm") ||
+    normalized.endsWith("/pnpm.cjs") ||
+    normalized.endsWith("/pnpm.js")
+  );
+}
+
 function runNpm(arguments_, options = {}) {
   const npmExecPath = process.env.npm_execpath;
-  return npmExecPath === undefined
+  return npmExecPath === undefined || isPnpmCli(npmExecPath)
     ? run(process.platform === "win32" ? "npm.cmd" : "npm", arguments_, {
         ...options,
         shell: process.platform === "win32",
@@ -101,7 +113,11 @@ function isolatedNpmEnvironment() {
       normalized.startsWith("npm_config_") ||
       normalized === "node_auth_token" ||
       normalized === "npm_token" ||
-      normalized === "npm_auth_token"
+      normalized === "npm_auth_token" ||
+      normalized === "npm_execpath" ||
+      normalized === "npm_lifecycle_event" ||
+      normalized === "npm_lifecycle_script" ||
+      normalized === "npm_command"
     ) {
       continue;
     }
@@ -120,6 +136,35 @@ export function publicRegistryArguments(
     registry,
     `--@pegma:registry=${registry}`,
   ];
+}
+
+function runPublicRegistryPnpm(arguments_, options = {}) {
+  const { registry = PUBLIC_NPM_REGISTRY, ...runOptions } = options;
+  const configDirectory = mkdtempSync(
+    join(tmpdir(), "pegma-mail-pnpm-config-"),
+  );
+  const userConfig = join(configDirectory, "user.npmrc");
+  const globalConfig = join(configDirectory, "global.npmrc");
+  writeFileSync(
+    userConfig,
+    `registry=${registry}\n@pegma:registry=${registry}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(globalConfig, "", { mode: 0o600 });
+  try {
+    return run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", arguments_, {
+      ...runOptions,
+      cwd: runOptions.cwd ?? configDirectory,
+      env: {
+        ...isolatedNpmEnvironment(),
+        npm_config_userconfig: userConfig,
+        npm_config_globalconfig: globalConfig,
+      },
+      shell: process.platform === "win32",
+    });
+  } finally {
+    rmSync(configDirectory, { recursive: true, force: true });
+  }
 }
 
 function runPublicRegistryNpm(arguments_, options = {}) {
@@ -165,6 +210,330 @@ function hashTarball(bytes) {
     shasum: createHash("sha1").update(bytes).digest("hex"),
     integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
   };
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const YAML_DOUBLE_QUOTE_ESCAPES = {
+  0: "\u0000",
+  a: "\u0007",
+  b: "\u0008",
+  t: "\u0009",
+  n: "\u000a",
+  v: "\u000b",
+  f: "\u000c",
+  r: "\u000d",
+  e: "\u001b",
+  " ": " ",
+  '"': '"',
+  "/": "/",
+  "\\": "\\",
+  N: "\u0085",
+  _: "\u00a0",
+  L: "\u2028",
+  P: "\u2029",
+};
+
+export function decodeYamlScalar(raw) {
+  const value = raw.trim();
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replaceAll("''", "'");
+  }
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    const body = value.slice(1, -1);
+    let decoded = "";
+    for (let index = 0; index < body.length; index += 1) {
+      const character = body[index];
+      if (character !== "\\") {
+        decoded += character;
+        continue;
+      }
+      const next = body[index + 1];
+      if (next === undefined) {
+        fail("unterminated YAML double-quoted escape");
+      }
+      if (next === "x" && /^[0-9A-Fa-f]{2}/u.test(body.slice(index + 2))) {
+        decoded += String.fromCharCode(
+          Number.parseInt(body.slice(index + 2, index + 4), 16),
+        );
+        index += 3;
+        continue;
+      }
+      if (next === "u" && /^[0-9A-Fa-f]{4}/u.test(body.slice(index + 2))) {
+        decoded += String.fromCharCode(
+          Number.parseInt(body.slice(index + 2, index + 6), 16),
+        );
+        index += 5;
+        continue;
+      }
+      if (next === "U" && /^[0-9A-Fa-f]{8}/u.test(body.slice(index + 2))) {
+        decoded += String.fromCodePoint(
+          Number.parseInt(body.slice(index + 2, index + 10), 16),
+        );
+        index += 9;
+        continue;
+      }
+      if (next === "\n") {
+        index += 1;
+        continue;
+      }
+      const escaped = YAML_DOUBLE_QUOTE_ESCAPES[next];
+      if (escaped === undefined) {
+        fail(`unsupported YAML double-quoted escape \\${next}`);
+      }
+      decoded += escaped;
+      index += 1;
+    }
+    return decoded;
+  }
+  return value;
+}
+
+function parseSemver(version) {
+  const match =
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u.exec(
+      version,
+    );
+  if (match === null) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ?? null,
+  };
+}
+
+function parsePartialSemver(version) {
+  const match =
+    /^(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u.exec(
+      version,
+    );
+  if (match === null) return null;
+  const precision =
+    match[3] !== undefined
+      ? "patch"
+      : match[2] !== undefined
+        ? "minor"
+        : "major";
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2] ?? 0),
+    patch: Number(match[3] ?? 0),
+    prerelease: match[4] ?? null,
+    precision,
+  };
+}
+
+function comparePrereleaseIdentifiers(left, right) {
+  const leftParts = left.split(".");
+  const rightParts = right.split(".");
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = leftParts[index];
+    const rightPart = rightParts[index];
+    if (leftPart === undefined) return -1;
+    if (rightPart === undefined) return 1;
+    const leftNumeric = /^(0|[1-9]\d*)$/u.test(leftPart);
+    const rightNumeric = /^(0|[1-9]\d*)$/u.test(rightPart);
+    if (leftNumeric && rightNumeric) {
+      const leftNumber = Number(leftPart);
+      const rightNumber = Number(rightPart);
+      if (leftNumber !== rightNumber) {
+        return leftNumber < rightNumber ? -1 : 1;
+      }
+      continue;
+    }
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    if (leftPart !== rightPart) return leftPart < rightPart ? -1 : 1;
+  }
+  return 0;
+}
+
+function compareSemver(left, right) {
+  if (left.major !== right.major) return left.major < right.major ? -1 : 1;
+  if (left.minor !== right.minor) return left.minor < right.minor ? -1 : 1;
+  if (left.patch !== right.patch) return left.patch < right.patch ? -1 : 1;
+  if (left.prerelease === null && right.prerelease === null) return 0;
+  if (left.prerelease === null) return 1;
+  if (right.prerelease === null) return -1;
+  return comparePrereleaseIdentifiers(left.prerelease, right.prerelease);
+}
+
+function stripLockVersionSuffix(version) {
+  const suffix = version.indexOf("(");
+  return suffix === -1 ? version : version.slice(0, suffix);
+}
+
+function isExactPin(specifier) {
+  return parseSemver(specifier) !== null;
+}
+
+function versionInHalfOpenRange(resolved, lower, upper) {
+  if (resolved.prerelease !== null && lower.prerelease === null) {
+    return false;
+  }
+  return (
+    compareSemver(resolved, lower) >= 0 && compareSemver(resolved, upper) < 0
+  );
+}
+
+function caretUpperBound(base) {
+  if (base.precision === "major") {
+    return { major: base.major + 1, minor: 0, patch: 0, prerelease: "0" };
+  }
+  if (base.precision === "minor") {
+    if (base.major > 0) {
+      return { major: base.major + 1, minor: 0, patch: 0, prerelease: "0" };
+    }
+    return { major: 0, minor: base.minor + 1, patch: 0, prerelease: "0" };
+  }
+  if (base.major > 0) {
+    return { major: base.major + 1, minor: 0, patch: 0, prerelease: "0" };
+  }
+  if (base.minor > 0) {
+    return { major: 0, minor: base.minor + 1, patch: 0, prerelease: "0" };
+  }
+  return { major: 0, minor: 0, patch: base.patch + 1, prerelease: "0" };
+}
+
+function tildeUpperBound(base) {
+  if (base.precision === "major") {
+    return { major: base.major + 1, minor: 0, patch: 0, prerelease: "0" };
+  }
+  return {
+    major: base.major,
+    minor: base.minor + 1,
+    patch: 0,
+    prerelease: "0",
+  };
+}
+
+function versionSatisfiesRange(version, specifier) {
+  const resolved = parseSemver(stripLockVersionSuffix(version));
+  if (resolved === null) return false;
+  if (specifier === "*" || specifier === "x" || specifier === "X") {
+    return resolved.prerelease === null;
+  }
+  if (specifier.startsWith("^")) {
+    const base = parsePartialSemver(specifier.slice(1));
+    return (
+      base !== null &&
+      versionInHalfOpenRange(resolved, base, caretUpperBound(base))
+    );
+  }
+  if (specifier.startsWith("~")) {
+    const base = parsePartialSemver(specifier.slice(1));
+    return (
+      base !== null &&
+      versionInHalfOpenRange(resolved, base, tildeUpperBound(base))
+    );
+  }
+  return false;
+}
+
+export function resolvedVersionMatchesSpecifier(version, specifier) {
+  if (isExactPin(specifier)) {
+    return version === specifier || version.startsWith(`${specifier}(`);
+  }
+  return versionSatisfiesRange(version, specifier);
+}
+
+function pnpmLockImporterBody(lockfile, importer) {
+  const importerHeader = new RegExp(
+    `^  (?:'${escapeRegExp(importer)}'|${escapeRegExp(importer)}):\\n`,
+    "m",
+  );
+  const header = importerHeader.exec(lockfile);
+  if (header === null) return null;
+  const start = header.index + header[0].length;
+  const rest = lockfile.slice(start);
+  const nextImporter = rest.search(/^  [^ \n]/m);
+  return nextImporter === -1 ? rest : rest.slice(0, nextImporter);
+}
+
+export function pnpmLockImporterHasSection(lockfile, importer, section) {
+  const body = pnpmLockImporterBody(lockfile, importer);
+  if (body === null) return false;
+  return new RegExp(`^    ${escapeRegExp(section)}:\\n`, "m").test(body);
+}
+
+function pnpmLockImporterSection(lockfile, importer, section) {
+  const body = pnpmLockImporterBody(lockfile, importer);
+  if (body === null) return null;
+  const header = new RegExp(`^    ${escapeRegExp(section)}:\\n`, "m");
+  const match = header.exec(body);
+  if (match === null) return null;
+  const start = match.index + match[0].length;
+  const rest = body.slice(start);
+  const nextSection = rest.search(/^    [^ \n]/m);
+  return nextSection === -1 ? rest : rest.slice(0, nextSection);
+}
+
+function pnpmLockDependency(
+  lockfile,
+  importer,
+  name,
+  section = "dependencies",
+) {
+  const sectionText = pnpmLockImporterSection(lockfile, importer, section);
+  if (sectionText === null) return null;
+  const key = name.startsWith("@") || name.includes("/") ? `'${name}'` : name;
+  const entry = new RegExp(
+    `^      ${escapeRegExp(key)}:\\n        specifier: ([^\\n]+)\\n        version: ([^\\n]+)`,
+    "m",
+  );
+  const match = entry.exec(sectionText);
+  if (match === null) return null;
+  return {
+    specifier: decodeYamlScalar(match[1]),
+    version: decodeYamlScalar(match[2]),
+  };
+}
+
+export function requirePnpmLockDependencies(
+  lockfile,
+  importer,
+  dependencies,
+  section = "dependencies",
+) {
+  for (const [name, specifier] of Object.entries(dependencies)) {
+    const locked = pnpmLockDependency(lockfile, importer, name, section);
+    if (locked === null) {
+      fail(`${name} is missing from pnpm-lock.yaml`);
+    }
+    if (locked.specifier !== specifier) {
+      fail(`${name} specifier is not synchronized with pnpm-lock.yaml`);
+    }
+    if (locked.version.length === 0) {
+      fail(`${name} resolved version is missing from pnpm-lock.yaml`);
+    }
+    if (!resolvedVersionMatchesSpecifier(locked.version, specifier)) {
+      fail(`${name} resolved version is not synchronized with pnpm-lock.yaml`);
+    }
+  }
+}
+
+export function requirePublicPackageLockDependencies(
+  lockfile,
+  importer,
+  manifest,
+) {
+  requirePnpmLockDependencies(
+    lockfile,
+    importer,
+    manifest.dependencies ?? {},
+    "dependencies",
+  );
+  if (pnpmLockImporterHasSection(lockfile, importer, "peerDependencies")) {
+    requirePnpmLockDependencies(
+      lockfile,
+      importer,
+      manifest.peerDependencies ?? {},
+      "peerDependencies",
+    );
+  }
 }
 
 function exportTargets(value) {
@@ -254,14 +623,13 @@ export async function validateRepository(options = {}) {
   const packageTsconfig = await readJson(
     join(packageDirectory, "tsconfig.json"),
   );
-  const lockfile = await readJson(join(root, "package-lock.json"));
-  const lockEntry = lockfile.packages?.[`packages/${PACKAGE.directory}`];
+  const lockfile = await readFile(join(root, "pnpm-lock.yaml"), "utf8");
 
   if (
     rootManifest.private !== true ||
-    rootManifest.packageManager !== `npm@${REVIEWED_NPM_VERSION}`
+    rootManifest.packageManager !== REVIEWED_PACKAGE_MANAGER
   ) {
-    fail(`the private root must pin npm@${REVIEWED_NPM_VERSION}`);
+    fail(`the private root must pin ${REVIEWED_PACKAGE_MANAGER}`);
   }
   if (
     manifest.name !== PACKAGE.name ||
@@ -291,7 +659,10 @@ export async function validateRepository(options = {}) {
     !Array.isArray(manifest.files) ||
     manifest.files.length === 0 ||
     manifest.files.some((entry) => !entry.startsWith("dist/")) ||
-    !manifest.scripts?.prepack?.includes("build")
+    !(
+      manifest.scripts?.prepack?.includes("build") ||
+      manifest.scripts?.prepack?.includes("tsc")
+    )
   ) {
     fail(`${PACKAGE.name} has an unsafe package allowlist or prepack`);
   }
@@ -315,9 +686,11 @@ export async function validateRepository(options = {}) {
   }
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
-  if (lockEntry?.version !== manifest.version) {
-    fail(`${PACKAGE.name} version is not synchronized with package-lock.json`);
-  }
+  requirePublicPackageLockDependencies(
+    lockfile,
+    `packages/${PACKAGE.directory}`,
+    manifest,
+  );
   const publicWorkspaces = [];
   for (const entry of await readdir(join(root, "packages"), {
     withFileTypes: true,
@@ -452,7 +825,7 @@ export async function prepareRelease(options = {}) {
   if ((await readdir(output)).length !== 0) {
     fail(`release output directory must be empty: ${output}`);
   }
-  runPublicRegistryNpm(["audit", "--omit=dev"], {
+  runPublicRegistryPnpm(["audit", "--prod"], {
     cwd: root,
     registry: options.registry,
   });

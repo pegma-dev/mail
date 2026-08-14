@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,12 +11,17 @@ import {
   checkBootstrapRegistry,
   checkRegistry,
   decidePublication,
+  decodeYamlScalar,
   isNormalReleaseVersion,
   parseArguments,
   prepareBootstrap,
   prepareRelease,
   publicRegistryArguments,
   publishPreparedRelease,
+  pnpmLockImporterHasSection,
+  requirePnpmLockDependencies,
+  requirePublicPackageLockDependencies,
+  resolvedVersionMatchesSpecifier,
   validateBootstrapTag,
   validateReleaseTag,
   validateRepository,
@@ -55,11 +60,35 @@ async function startTestRegistry(
   };
 }
 
-function reviewedNpmExecPath() {
+function isPnpmCli(path: string) {
+  const normalized = path.replaceAll("\\", "/").toLowerCase();
   return (
-    process.env["npm_execpath"] ??
-    join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+    normalized.includes("/pnpm/") ||
+    normalized.endsWith("/pnpm") ||
+    normalized.endsWith("/pnpm.cjs") ||
+    normalized.endsWith("/pnpm.js")
   );
+}
+
+function reviewedNpmExecPath() {
+  const fromEnv = process.env["npm_execpath"];
+  if (fromEnv !== undefined && !isPnpmCli(fromEnv)) return fromEnv;
+  const bundled = join(
+    dirname(process.execPath),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  if (existsSync(bundled)) return bundled;
+  const which = spawnSync("which", ["npm"], { encoding: "utf8" });
+  const npmBin = which.stdout.trim().split("\n")[0];
+  if (which.status === 0 && npmBin !== undefined && npmBin.length > 0) {
+    const nearby = join(dirname(npmBin), "..", "npm", "bin", "npm-cli.js");
+    if (existsSync(nearby)) return nearby;
+    return npmBin;
+  }
+  return bundled;
 }
 
 function cleanNpmEnvironment() {
@@ -123,21 +152,19 @@ async function writeReleaseRepositoryFixture(
   const packageManifest = JSON.parse(
     readFileSync(join(sourceRoot, "packages", "mail", "package.json"), "utf8"),
   ) as Record<string, unknown>;
-  const lockfile = JSON.parse(
-    readFileSync(join(sourceRoot, "package-lock.json"), "utf8"),
-  ) as {
-    packages: Record<string, { version?: string }>;
-  };
   packageManifest["version"] = version;
-  lockfile.packages["packages/mail"]!.version = version;
   await Promise.all([
     writeFile(
       join(directory, "package.json"),
       `${JSON.stringify(rootManifest, null, 2)}\n`,
     ),
     writeFile(
-      join(directory, "package-lock.json"),
-      `${JSON.stringify(lockfile, null, 2)}\n`,
+      join(directory, "pnpm-lock.yaml"),
+      readFileSync(join(sourceRoot, "pnpm-lock.yaml"), "utf8"),
+    ),
+    writeFile(
+      join(directory, "pnpm-workspace.yaml"),
+      readFileSync(join(sourceRoot, "pnpm-workspace.yaml"), "utf8"),
     ),
     writeFile(
       join(packageDirectory, "package.json"),
@@ -178,6 +205,10 @@ async function writeBootstrapRepositoryFixture(directory: string) {
       join(sourceRoot, "packages", "mail", "src"),
       join(directory, "packages", "mail", "src"),
       { recursive: true },
+    ),
+    symlink(
+      join(sourceRoot, "packages", "mail", "node_modules"),
+      join(directory, "packages", "mail", "node_modules"),
     ),
   ]);
   return directory;
@@ -259,7 +290,7 @@ async function startDependencyRegistry(
       "  writeFileSync(recordPath, JSON.stringify(requests));",
       '  if (request.url.startsWith("/-/npm/v1/security/")) {',
       '    response.setHeader("content-type", "application/json");',
-      '    response.end("{}");',
+      "    response.end(JSON.stringify({ actions: [], advisories: {}, muted: [], metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0 }, dependencies: 0, devDependencies: 0, optionalDependencies: 0, totalDependencies: 0 } }));",
       "    return;",
       "  }",
       '  if (request.url.startsWith("/tarballs/")) {',
@@ -382,23 +413,157 @@ describe("release package metadata", () => {
     ) as { overrides: Record<string, string> };
     expect(rootManifest.overrides).toMatchObject({ uuid: "^11.1.1" });
 
-    const lockfile = JSON.parse(
-      readFileSync(join(process.cwd(), "package-lock.json"), "utf8"),
-    ) as { packages: Record<string, { version?: string }> };
-    const resolved = Object.entries(lockfile.packages).filter(([path]) =>
-      /(?:^|\/)node_modules\/uuid$/.test(path),
+    const lockfile = readFileSync(
+      join(process.cwd(), "pnpm-lock.yaml"),
+      "utf8",
     );
+    const resolved = [...lockfile.matchAll(/^ {2}uuid@([^:( \n]+):/gm)]
+      .map((match) => match[1])
+      .filter((version): version is string => version !== undefined);
     expect(resolved.length).toBeGreaterThan(0);
-    const vulnerable = resolved.filter(([, entry]) => {
-      const [major = 0, minor = 0, patch = 0] = (entry.version ?? "0")
-        .split(".")
-        .map(Number);
+    const vulnerable = resolved.filter((version) => {
+      const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
       if (major !== 11) return major < 11;
       return minor < 1 || (minor === 1 && patch < 1);
     });
+    expect(vulnerable.map((version) => `uuid@${version}`)).toEqual([]);
+  });
+
+  it("decodes YAML lockfile scalars before comparing them", () => {
+    expect(decodeYamlScalar("0.1.1")).toBe("0.1.1");
+    expect(decodeYamlScalar("^1.2.0")).toBe("^1.2.0");
+    expect(decodeYamlScalar("'1'")).toBe("1");
+    expect(decodeYamlScalar("'*'")).toBe("*");
+    expect(decodeYamlScalar("'it''s'")).toBe("it's");
+    expect(decodeYamlScalar('"1.2.3"')).toBe("1.2.3");
+    expect(decodeYamlScalar('"\\u0041"')).toBe("A");
+  });
+
+  it.each([
+    ["1.2.3", "1.2.3", true],
+    ["1.2.3(@types/node@26.1.2)", "1.2.3", true],
+    ["1.2.4", "1.2.3", false],
+    ["1.2.3-rc.1", "1.2.3", false],
+    ["1.2.3-rc.1(@types/node@26.1.2)", "1.2.3", false],
+    ["1.2.3-rc.1", "1.2.3-rc.1", true],
+    ["1.2.3-rc.1(@types/node@26.1.2)", "1.2.3-rc.1", true],
+    ["1.2.3", "1.2.3-rc.1", false],
+    ["1.2.3", "^1.2.0", true],
+    ["1.2.3(@types/node@26.1.2)", "^1.2.0", true],
+    ["2.0.0", "^1.2.0", false],
+    ["0.0.5", "^0.0", true],
+    ["0.1.0", "^0.0", false],
+    ["0.5.0", "^0", true],
+    ["1.0.0", "^0", false],
+    ["0.0.3", "^0.0.3", true],
+    ["0.0.4", "^0.0.3", false],
+    ["0.2.9", "^0.2.3", true],
+    ["0.3.0", "^0.2.3", false],
+    ["1.2.3", "~1.2.0", true],
+    ["1.3.0", "~1.2.0", false],
+    ["4.1.10", "*", true],
+  ] as const)(
+    "treats resolved %s against specifier %s as %s",
+    (version, specifier, expected) => {
+      expect(resolvedVersionMatchesSpecifier(version, specifier)).toBe(
+        expected,
+      );
+    },
+  );
+
+  it("accepts quoted lockfile scalars and ranged resolutions", () => {
+    const lockfile = [
+      "importers:",
+      "",
+      "  packages/mail:",
+      "    dependencies:",
+      "      '@pegma/spine':",
+      "        specifier: '0.1.1'",
+      '        version: "0.1.1"',
+      "      ranged:",
+      "        specifier: '^1.2.0'",
+      "        version: 1.2.3",
+      "    peerDependencies:",
+      "      vitest:",
+      "        specifier: ^4.1.10",
+      "        version: 4.1.10",
+      "",
+    ].join("\n");
+    expect(() =>
+      requirePublicPackageLockDependencies(lockfile, "packages/mail", {
+        dependencies: {
+          "@pegma/spine": "0.1.1",
+          ranged: "^1.2.0",
+        },
+        peerDependencies: { vitest: "^4.1.10" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("does not require peers when pnpm omitted that importer section", () => {
+    const lockfile = [
+      "importers:",
+      "",
+      "  packages/mail:",
+      "    dependencies:",
+      "      '@pegma/spine':",
+      "        specifier: 0.1.1",
+      "        version: 0.1.1",
+      "",
+    ].join("\n");
     expect(
-      vulnerable.map(([path, entry]) => `${path}@${entry.version}`),
-    ).toEqual([]);
+      pnpmLockImporterHasSection(lockfile, "packages/mail", "peerDependencies"),
+    ).toBe(false);
+    expect(() =>
+      requirePublicPackageLockDependencies(lockfile, "packages/mail", {
+        dependencies: { "@pegma/spine": "0.1.1" },
+        peerDependencies: { vitest: "^4.1.10" },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      requirePnpmLockDependencies(
+        lockfile,
+        "packages/mail",
+        { vitest: "^4.1.10" },
+        "peerDependencies",
+      ),
+    ).toThrow("vitest is missing from pnpm-lock.yaml");
+  });
+
+  it("rejects an exact pin whose resolved version drifted", () => {
+    const lockfile = [
+      "importers:",
+      "",
+      "  packages/mail:",
+      "    dependencies:",
+      "      '@pegma/spine':",
+      "        specifier: 0.1.1",
+      "        version: 999.0.0",
+      "",
+    ].join("\n");
+    expect(() =>
+      requirePnpmLockDependencies(lockfile, "packages/mail", {
+        "@pegma/spine": "0.1.1",
+      }),
+    ).toThrow("resolved version is not synchronized");
+  });
+
+  it("rejects a range whose resolved version is outside the specifier", () => {
+    const lockfile = [
+      "importers:",
+      "",
+      "  packages/mail:",
+      "    dependencies:",
+      "      ranged:",
+      "        specifier: ^1.2.0",
+      "        version: 2.0.0",
+      "",
+    ].join("\n");
+    expect(() =>
+      requirePnpmLockDependencies(lockfile, "packages/mail", {
+        ranged: "^1.2.0",
+      }),
+    ).toThrow("resolved version is not synchronized");
   });
 
   it("validates package metadata, exact dependencies, and lockfile together", async () => {
@@ -790,14 +955,28 @@ describe("release package metadata", () => {
     const fixtures = [
       packDependencyFixture(
         npmExecPath,
-        join(process.cwd(), "node_modules", "@pegma", "spine"),
+        join(
+          process.cwd(),
+          "packages",
+          "mail",
+          "node_modules",
+          "@pegma",
+          "spine",
+        ),
         directory,
         fixtureUserConfig,
         fixtureGlobalConfig,
       ),
       packDependencyFixture(
         npmExecPath,
-        join(process.cwd(), "node_modules", "@pegma", "storage-core"),
+        join(
+          process.cwd(),
+          "packages",
+          "mail",
+          "node_modules",
+          "@pegma",
+          "storage-core",
+        ),
         directory,
         fixtureUserConfig,
         fixtureGlobalConfig,
@@ -964,7 +1143,11 @@ describe("release package metadata", () => {
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
-    expect(prepare).toContain("npm run release:check");
+    expect(publish).not.toContain("pnpm install");
+    expect(publish).not.toContain("corepack");
+    expect(publish).not.toContain("pnpm run");
+    expect(publish).toContain("npm run release:publish");
+    expect(prepare).toContain("pnpm run release:check");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).not.toContain("NODE_AUTH_TOKEN");
     expect(workflow).not.toContain("bootstrap:");
@@ -1000,12 +1183,25 @@ describe("release package metadata", () => {
     );
     expect(workflow).toContain("          - 22");
     expect(workflow).toContain("          - 24");
+    expect(workflow).toContain("run: corepack enable");
     const installNpm = workflow.indexOf(
       "run: npm install --global npm@11.18.0",
     );
-    const installDependencies = workflow.indexOf("run: npm ci");
+    const installDependencies = workflow.indexOf(
+      "run: pnpm install --frozen-lockfile",
+    );
     expect(installNpm).toBeGreaterThan(-1);
     expect(installNpm).toBeLessThan(installDependencies);
+  });
+
+  it("documents Corepack installation before enable for Node 25+", () => {
+    for (const path of ["README.md", "CONTRIBUTING.md"]) {
+      const text = readFileSync(join(process.cwd(), path), "utf8");
+      const install = text.indexOf("npm install -g corepack");
+      const enable = text.indexOf("corepack enable");
+      expect(install).toBeGreaterThan(-1);
+      expect(enable).toBeGreaterThan(install);
+    }
   });
 
   it("forces deterministic LF text checkouts even when autocrlf is enabled", () => {
@@ -1161,15 +1357,7 @@ describe("release package metadata", () => {
         ].join("\n"),
       );
       await writeFile(globalConfig, "");
-      const npmExecPath =
-        process.env["npm_execpath"] ??
-        join(
-          dirname(process.execPath),
-          "node_modules",
-          "npm",
-          "bin",
-          "npm-cli.js",
-        );
+      const npmExecPath = reviewedNpmExecPath();
       expect(existsSync(npmExecPath)).toBe(true);
       const version = spawnSync(process.execPath, [npmExecPath!, "--version"], {
         encoding: "utf8",

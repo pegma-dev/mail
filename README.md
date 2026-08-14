@@ -49,3 +49,14 @@ belong to hosts or other components.
 See [Architecture](docs/ARCHITECTURE.md), [Project Plan](docs/PROJECT_PLAN.md),
 [Release Notes](docs/RELEASE_NOTES.md), and
 [Releasing](docs/RELEASING.md).
+
+## Development
+
+```sh
+npm install -g corepack
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run format:check
+pnpm run check
+pnpm test
+```
