@@ -367,7 +367,7 @@ function stripLockVersionSuffix(version) {
 }
 
 function isExactPin(specifier) {
-  return STABLE_SEMVER.test(specifier);
+  return parseSemver(specifier) !== null;
 }
 
 function versionInHalfOpenRange(resolved, lower, upper) {
@@ -380,6 +380,15 @@ function versionInHalfOpenRange(resolved, lower, upper) {
 }
 
 function caretUpperBound(base) {
+  if (base.precision === "major") {
+    return { major: base.major + 1, minor: 0, patch: 0, prerelease: "0" };
+  }
+  if (base.precision === "minor") {
+    if (base.major > 0) {
+      return { major: base.major + 1, minor: 0, patch: 0, prerelease: "0" };
+    }
+    return { major: 0, minor: base.minor + 1, patch: 0, prerelease: "0" };
+  }
   if (base.major > 0) {
     return { major: base.major + 1, minor: 0, patch: 0, prerelease: "0" };
   }
@@ -431,7 +440,7 @@ export function resolvedVersionMatchesSpecifier(version, specifier) {
   return versionSatisfiesRange(version, specifier);
 }
 
-function pnpmLockDependency(lockfile, importer, name) {
+function pnpmLockImporterBody(lockfile, importer) {
   const importerHeader = new RegExp(
     `^  (?:'${escapeRegExp(importer)}'|${escapeRegExp(importer)}):\\n`,
     "m",
@@ -441,13 +450,41 @@ function pnpmLockDependency(lockfile, importer, name) {
   const start = header.index + header[0].length;
   const rest = lockfile.slice(start);
   const nextImporter = rest.search(/^  [^ \n]/m);
-  const section = nextImporter === -1 ? rest : rest.slice(0, nextImporter);
+  return nextImporter === -1 ? rest : rest.slice(0, nextImporter);
+}
+
+export function pnpmLockImporterHasSection(lockfile, importer, section) {
+  const body = pnpmLockImporterBody(lockfile, importer);
+  if (body === null) return false;
+  return new RegExp(`^    ${escapeRegExp(section)}:\\n`, "m").test(body);
+}
+
+function pnpmLockImporterSection(lockfile, importer, section) {
+  const body = pnpmLockImporterBody(lockfile, importer);
+  if (body === null) return null;
+  const header = new RegExp(`^    ${escapeRegExp(section)}:\\n`, "m");
+  const match = header.exec(body);
+  if (match === null) return null;
+  const start = match.index + match[0].length;
+  const rest = body.slice(start);
+  const nextSection = rest.search(/^    [^ \n]/m);
+  return nextSection === -1 ? rest : rest.slice(0, nextSection);
+}
+
+function pnpmLockDependency(
+  lockfile,
+  importer,
+  name,
+  section = "dependencies",
+) {
+  const sectionText = pnpmLockImporterSection(lockfile, importer, section);
+  if (sectionText === null) return null;
   const key = name.startsWith("@") || name.includes("/") ? `'${name}'` : name;
   const entry = new RegExp(
     `^      ${escapeRegExp(key)}:\\n        specifier: ([^\\n]+)\\n        version: ([^\\n]+)`,
     "m",
   );
-  const match = entry.exec(section);
+  const match = entry.exec(sectionText);
   if (match === null) return null;
   return {
     specifier: decodeYamlScalar(match[1]),
@@ -455,9 +492,14 @@ function pnpmLockDependency(lockfile, importer, name) {
   };
 }
 
-export function requirePnpmLockDependencies(lockfile, importer, dependencies) {
+export function requirePnpmLockDependencies(
+  lockfile,
+  importer,
+  dependencies,
+  section = "dependencies",
+) {
   for (const [name, specifier] of Object.entries(dependencies)) {
-    const locked = pnpmLockDependency(lockfile, importer, name);
+    const locked = pnpmLockDependency(lockfile, importer, name, section);
     if (locked === null) {
       fail(`${name} is missing from pnpm-lock.yaml`);
     }
@@ -470,6 +512,27 @@ export function requirePnpmLockDependencies(lockfile, importer, dependencies) {
     if (!resolvedVersionMatchesSpecifier(locked.version, specifier)) {
       fail(`${name} resolved version is not synchronized with pnpm-lock.yaml`);
     }
+  }
+}
+
+export function requirePublicPackageLockDependencies(
+  lockfile,
+  importer,
+  manifest,
+) {
+  requirePnpmLockDependencies(
+    lockfile,
+    importer,
+    manifest.dependencies ?? {},
+    "dependencies",
+  );
+  if (pnpmLockImporterHasSection(lockfile, importer, "peerDependencies")) {
+    requirePnpmLockDependencies(
+      lockfile,
+      importer,
+      manifest.peerDependencies ?? {},
+      "peerDependencies",
+    );
   }
 }
 
@@ -623,10 +686,11 @@ export async function validateRepository(options = {}) {
   }
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
-  requirePnpmLockDependencies(lockfile, `packages/${PACKAGE.directory}`, {
-    ...(manifest.dependencies ?? {}),
-    ...(manifest.peerDependencies ?? {}),
-  });
+  requirePublicPackageLockDependencies(
+    lockfile,
+    `packages/${PACKAGE.directory}`,
+    manifest,
+  );
   const publicWorkspaces = [];
   for (const entry of await readdir(join(root, "packages"), {
     withFileTypes: true,

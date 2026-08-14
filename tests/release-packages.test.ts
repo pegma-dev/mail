@@ -18,7 +18,9 @@ import {
   prepareRelease,
   publicRegistryArguments,
   publishPreparedRelease,
+  pnpmLockImporterHasSection,
   requirePnpmLockDependencies,
+  requirePublicPackageLockDependencies,
   resolvedVersionMatchesSpecifier,
   validateBootstrapTag,
   validateReleaseTag,
@@ -441,9 +443,22 @@ describe("release package metadata", () => {
     ["1.2.3", "1.2.3", true],
     ["1.2.3(@types/node@26.1.2)", "1.2.3", true],
     ["1.2.4", "1.2.3", false],
+    ["1.2.3-rc.1", "1.2.3", false],
+    ["1.2.3-rc.1(@types/node@26.1.2)", "1.2.3", false],
+    ["1.2.3-rc.1", "1.2.3-rc.1", true],
+    ["1.2.3-rc.1(@types/node@26.1.2)", "1.2.3-rc.1", true],
+    ["1.2.3", "1.2.3-rc.1", false],
     ["1.2.3", "^1.2.0", true],
     ["1.2.3(@types/node@26.1.2)", "^1.2.0", true],
     ["2.0.0", "^1.2.0", false],
+    ["0.0.5", "^0.0", true],
+    ["0.1.0", "^0.0", false],
+    ["0.5.0", "^0", true],
+    ["1.0.0", "^0", false],
+    ["0.0.3", "^0.0.3", true],
+    ["0.0.4", "^0.0.3", false],
+    ["0.2.9", "^0.2.3", true],
+    ["0.3.0", "^0.2.3", false],
     ["1.2.3", "~1.2.0", true],
     ["1.3.0", "~1.2.0", false],
     ["4.1.10", "*", true],
@@ -475,12 +490,44 @@ describe("release package metadata", () => {
       "",
     ].join("\n");
     expect(() =>
-      requirePnpmLockDependencies(lockfile, "packages/mail", {
-        "@pegma/spine": "0.1.1",
-        ranged: "^1.2.0",
-        vitest: "^4.1.10",
+      requirePublicPackageLockDependencies(lockfile, "packages/mail", {
+        dependencies: {
+          "@pegma/spine": "0.1.1",
+          ranged: "^1.2.0",
+        },
+        peerDependencies: { vitest: "^4.1.10" },
       }),
     ).not.toThrow();
+  });
+
+  it("does not require peers when pnpm omitted that importer section", () => {
+    const lockfile = [
+      "importers:",
+      "",
+      "  packages/mail:",
+      "    dependencies:",
+      "      '@pegma/spine':",
+      "        specifier: 0.1.1",
+      "        version: 0.1.1",
+      "",
+    ].join("\n");
+    expect(
+      pnpmLockImporterHasSection(lockfile, "packages/mail", "peerDependencies"),
+    ).toBe(false);
+    expect(() =>
+      requirePublicPackageLockDependencies(lockfile, "packages/mail", {
+        dependencies: { "@pegma/spine": "0.1.1" },
+        peerDependencies: { vitest: "^4.1.10" },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      requirePnpmLockDependencies(
+        lockfile,
+        "packages/mail",
+        { vitest: "^4.1.10" },
+        "peerDependencies",
+      ),
+    ).toThrow("vitest is missing from pnpm-lock.yaml");
   });
 
   it("rejects an exact pin whose resolved version drifted", () => {

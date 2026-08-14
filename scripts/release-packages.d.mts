@@ -24,10 +24,24 @@ export function resolvedVersionMatchesSpecifier(
   version: string,
   specifier: string,
 ): boolean;
+export function pnpmLockImporterHasSection(
+  lockfile: string,
+  importer: string,
+  section: string,
+): boolean;
 export function requirePnpmLockDependencies(
   lockfile: string,
   importer: string,
   dependencies: Readonly<Record<string, string>>,
+  section?: string,
+): void;
+export function requirePublicPackageLockDependencies(
+  lockfile: string,
+  importer: string,
+  manifest: {
+    readonly dependencies?: Readonly<Record<string, string>>;
+    readonly peerDependencies?: Readonly<Record<string, string>>;
+  },
 ): void;
 export function publicRegistryArguments(
   arguments_: readonly string[],
