@@ -1,8 +1,10 @@
 # Contributing to Mail
 
-Mail requires Node.js 22 or newer.
+Mail requires Node.js 22 or newer. Official Node 25+ distributions do not
+bundle Corepack, so install it before enabling the reviewed package manager.
 
 ```sh
+npm install -g corepack
 corepack enable
 pnpm install --frozen-lockfile
 pnpm run format:check

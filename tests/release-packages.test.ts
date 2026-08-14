@@ -11,12 +11,15 @@ import {
   checkBootstrapRegistry,
   checkRegistry,
   decidePublication,
+  decodeYamlScalar,
   isNormalReleaseVersion,
   parseArguments,
   prepareBootstrap,
   prepareRelease,
   publicRegistryArguments,
   publishPreparedRelease,
+  requirePnpmLockDependencies,
+  resolvedVersionMatchesSpecifier,
   validateBootstrapTag,
   validateReleaseTag,
   validateRepository,
@@ -422,6 +425,98 @@ describe("release package metadata", () => {
       return minor < 1 || (minor === 1 && patch < 1);
     });
     expect(vulnerable.map((version) => `uuid@${version}`)).toEqual([]);
+  });
+
+  it("decodes YAML lockfile scalars before comparing them", () => {
+    expect(decodeYamlScalar("0.1.1")).toBe("0.1.1");
+    expect(decodeYamlScalar("^1.2.0")).toBe("^1.2.0");
+    expect(decodeYamlScalar("'1'")).toBe("1");
+    expect(decodeYamlScalar("'*'")).toBe("*");
+    expect(decodeYamlScalar("'it''s'")).toBe("it's");
+    expect(decodeYamlScalar('"1.2.3"')).toBe("1.2.3");
+    expect(decodeYamlScalar('"\\u0041"')).toBe("A");
+  });
+
+  it.each([
+    ["1.2.3", "1.2.3", true],
+    ["1.2.3(@types/node@26.1.2)", "1.2.3", true],
+    ["1.2.4", "1.2.3", false],
+    ["1.2.3", "^1.2.0", true],
+    ["1.2.3(@types/node@26.1.2)", "^1.2.0", true],
+    ["2.0.0", "^1.2.0", false],
+    ["1.2.3", "~1.2.0", true],
+    ["1.3.0", "~1.2.0", false],
+    ["4.1.10", "*", true],
+  ] as const)(
+    "treats resolved %s against specifier %s as %s",
+    (version, specifier, expected) => {
+      expect(resolvedVersionMatchesSpecifier(version, specifier)).toBe(
+        expected,
+      );
+    },
+  );
+
+  it("accepts quoted lockfile scalars and ranged resolutions", () => {
+    const lockfile = [
+      "importers:",
+      "",
+      "  packages/mail:",
+      "    dependencies:",
+      "      '@pegma/spine':",
+      "        specifier: '0.1.1'",
+      '        version: "0.1.1"',
+      "      ranged:",
+      "        specifier: '^1.2.0'",
+      "        version: 1.2.3",
+      "    peerDependencies:",
+      "      vitest:",
+      "        specifier: ^4.1.10",
+      "        version: 4.1.10",
+      "",
+    ].join("\n");
+    expect(() =>
+      requirePnpmLockDependencies(lockfile, "packages/mail", {
+        "@pegma/spine": "0.1.1",
+        ranged: "^1.2.0",
+        vitest: "^4.1.10",
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects an exact pin whose resolved version drifted", () => {
+    const lockfile = [
+      "importers:",
+      "",
+      "  packages/mail:",
+      "    dependencies:",
+      "      '@pegma/spine':",
+      "        specifier: 0.1.1",
+      "        version: 999.0.0",
+      "",
+    ].join("\n");
+    expect(() =>
+      requirePnpmLockDependencies(lockfile, "packages/mail", {
+        "@pegma/spine": "0.1.1",
+      }),
+    ).toThrow("resolved version is not synchronized");
+  });
+
+  it("rejects a range whose resolved version is outside the specifier", () => {
+    const lockfile = [
+      "importers:",
+      "",
+      "  packages/mail:",
+      "    dependencies:",
+      "      ranged:",
+      "        specifier: ^1.2.0",
+      "        version: 2.0.0",
+      "",
+    ].join("\n");
+    expect(() =>
+      requirePnpmLockDependencies(lockfile, "packages/mail", {
+        ranged: "^1.2.0",
+      }),
+    ).toThrow("resolved version is not synchronized");
   });
 
   it("validates package metadata, exact dependencies, and lockfile together", async () => {
@@ -1050,6 +1145,16 @@ describe("release package metadata", () => {
     );
     expect(installNpm).toBeGreaterThan(-1);
     expect(installNpm).toBeLessThan(installDependencies);
+  });
+
+  it("documents Corepack installation before enable for Node 25+", () => {
+    for (const path of ["README.md", "CONTRIBUTING.md"]) {
+      const text = readFileSync(join(process.cwd(), path), "utf8");
+      const install = text.indexOf("npm install -g corepack");
+      const enable = text.indexOf("corepack enable");
+      expect(install).toBeGreaterThan(-1);
+      expect(enable).toBeGreaterThan(install);
+    }
   });
 
   it("forces deterministic LF text checkouts even when autocrlf is enabled", () => {

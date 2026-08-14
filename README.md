@@ -53,6 +53,7 @@ See [Architecture](docs/ARCHITECTURE.md), [Project Plan](docs/PROJECT_PLAN.md),
 ## Development
 
 ```sh
+npm install -g corepack
 corepack enable
 pnpm install --frozen-lockfile
 pnpm run format:check

@@ -19,6 +19,16 @@ export const RELEASE_PACKAGES: readonly {
 }[];
 export const PACKAGE_FILES: readonly string[];
 export function isNormalReleaseVersion(version: unknown): boolean;
+export function decodeYamlScalar(raw: string): string;
+export function resolvedVersionMatchesSpecifier(
+  version: string,
+  specifier: string,
+): boolean;
+export function requirePnpmLockDependencies(
+  lockfile: string,
+  importer: string,
+  dependencies: Readonly<Record<string, string>>,
+): void;
 export function publicRegistryArguments(
   arguments_: readonly string[],
   registry?: string,
