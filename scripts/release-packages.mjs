@@ -1,7 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import {
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
@@ -26,6 +34,7 @@ const BOOTSTRAP_TAG = `v${BOOTSTRAP_VERSION}`;
 const FIRST_RELEASE_VERSION = "0.1.0";
 const RELEASE_MODE = "release";
 const BOOTSTRAP_MODE = "bootstrap";
+const INVOCATION_EXEC_PATH = process.env.npm_execpath;
 
 export const RELEASE_PACKAGES = [PACKAGE];
 export const PACKAGE_FILES = [
@@ -56,6 +65,18 @@ function requireNormalReleaseVersion(version) {
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
+}
+
+function hasExactKeys(value, keys) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index])
+  );
 }
 
 function safeEqual(left, right) {
@@ -95,14 +116,69 @@ function isPnpmCli(path) {
   );
 }
 
+export function resolveNpmCli() {
+  const configured = process.env.npm_execpath;
+  if (
+    configured !== undefined &&
+    !isPnpmCli(configured) &&
+    existsSync(configured)
+  ) {
+    return configured;
+  }
+  const candidates = [];
+  const lookup = spawnSync(
+    process.platform === "win32" ? "where.exe" : "which",
+    [process.platform === "win32" ? "npm.cmd" : "npm"],
+    { encoding: "utf8", shell: false },
+  );
+  if (lookup.status === 0) {
+    for (const executable of lookup.stdout.split(/\r?\n/u).filter(Boolean)) {
+      if (process.platform !== "win32") {
+        candidates.push(realpathSync(executable));
+      } else {
+        candidates.push(
+          join(dirname(executable), "node_modules", "npm", "bin", "npm-cli.js"),
+        );
+      }
+    }
+  }
+  candidates.push(
+    process.platform === "win32"
+      ? join(
+          dirname(process.execPath),
+          "node_modules",
+          "npm",
+          "bin",
+          "npm-cli.js",
+        )
+      : join(
+          dirname(process.execPath),
+          "..",
+          "lib",
+          "node_modules",
+          "npm",
+          "bin",
+          "npm-cli.js",
+        ),
+  );
+  const cli = [...new Set(candidates)]
+    .filter((candidate) => existsSync(candidate))
+    .find((candidate) => {
+      const version = spawnSync(process.execPath, [candidate, "--version"], {
+        encoding: "utf8",
+        env: isolatedNpmEnvironment(),
+        shell: false,
+      });
+      return (
+        version.status === 0 && version.stdout.trim() === REVIEWED_NPM_VERSION
+      );
+    });
+  if (cli === undefined) fail("could not resolve the npm CLI");
+  return cli;
+}
+
 function runNpm(arguments_, options = {}) {
-  const npmExecPath = process.env.npm_execpath;
-  return npmExecPath === undefined || isPnpmCli(npmExecPath)
-    ? run(process.platform === "win32" ? "npm.cmd" : "npm", arguments_, {
-        ...options,
-        shell: process.platform === "win32",
-      })
-    : run(process.execPath, [npmExecPath, ...arguments_], options);
+  return run(process.execPath, [resolveNpmCli(), ...arguments_], options);
 }
 
 function isolatedNpmEnvironment() {
@@ -117,7 +193,10 @@ function isolatedNpmEnvironment() {
       normalized === "npm_execpath" ||
       normalized === "npm_lifecycle_event" ||
       normalized === "npm_lifecycle_script" ||
-      normalized === "npm_command"
+      normalized === "npm_command" ||
+      normalized === "node_options" ||
+      normalized === "node_extra_ca_certs" ||
+      normalized.endsWith("_proxy")
     ) {
       continue;
     }
@@ -152,14 +231,29 @@ function runPublicRegistryPnpm(arguments_, options = {}) {
   );
   writeFileSync(globalConfig, "", { mode: 0o600 });
   try {
+    const pnpmExecPath = [process.env.npm_execpath, INVOCATION_EXEC_PATH].find(
+      (candidate) =>
+        candidate !== undefined &&
+        isPnpmCli(candidate) &&
+        existsSync(candidate),
+    );
+    const environment = {
+      ...isolatedNpmEnvironment(),
+      npm_config_userconfig: userConfig,
+      npm_config_globalconfig: globalConfig,
+    };
+    const cwd = runOptions.cwd ?? configDirectory;
+    if (pnpmExecPath !== undefined) {
+      return run(process.execPath, [pnpmExecPath, ...arguments_], {
+        ...runOptions,
+        cwd,
+        env: environment,
+      });
+    }
     return run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", arguments_, {
       ...runOptions,
-      cwd: runOptions.cwd ?? configDirectory,
-      env: {
-        ...isolatedNpmEnvironment(),
-        npm_config_userconfig: userConfig,
-        npm_config_globalconfig: globalConfig,
-      },
+      cwd,
+      env: environment,
       shell: process.platform === "win32",
     });
   } finally {
@@ -169,9 +263,11 @@ function runPublicRegistryPnpm(arguments_, options = {}) {
 
 function runPublicRegistryNpm(arguments_, options = {}) {
   const { registry = PUBLIC_NPM_REGISTRY, ...runOptions } = options;
-  const configDirectory = mkdtempSync(join(tmpdir(), "pegma-mail-npm-config-"));
+  const configDirectory = mkdtempSync(join(tmpdir(), "pegma-mail-npm-"));
   const userConfig = join(configDirectory, "user.npmrc");
   const globalConfig = join(configDirectory, "global.npmrc");
+  const workingDirectory = join(configDirectory, "work");
+  mkdirSync(workingDirectory);
   writeFileSync(userConfig, "", { mode: 0o600 });
   writeFileSync(globalConfig, "", { mode: 0o600 });
   try {
@@ -188,7 +284,7 @@ function runPublicRegistryNpm(arguments_, options = {}) {
       ),
       {
         ...runOptions,
-        cwd: runOptions.cwd ?? configDirectory,
+        cwd: runOptions.cwd ?? workingDirectory,
         env: isolatedNpmEnvironment(),
       },
     );
@@ -208,6 +304,8 @@ function rootDirectory() {
 function hashTarball(bytes) {
   return {
     shasum: createHash("sha1").update(bytes).digest("hex"),
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    sha512: createHash("sha512").update(bytes).digest("hex"),
     integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
   };
 }
@@ -550,7 +648,7 @@ function validateSignedTag(options, releaseTag) {
     options.expectedReleaseCommit ?? process.env.RELEASE_COMMIT;
   if (
     expectedReleaseCommit === undefined ||
-    !/^[0-9a-f]{40,64}$/u.test(expectedReleaseCommit)
+    !/^[0-9a-f]{40}$/u.test(expectedReleaseCommit)
   ) {
     fail("an exact release event commit is required");
   }
@@ -600,7 +698,10 @@ function validateSignedTag(options, releaseTag) {
 
 export function validateReleaseTag(options = {}) {
   const releaseTag = options.releaseTag ?? process.env.RELEASE_TAG;
-  if (releaseTag === undefined || !/^v\d+\.\d+\.\d+$/u.test(releaseTag)) {
+  if (
+    releaseTag === undefined ||
+    !/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.test(releaseTag)
+  ) {
     fail("a stable release tag is required");
   }
   requireNormalReleaseVersion(releaseTag.slice(1));
@@ -777,6 +878,41 @@ function verifyPackedFiles(manifest, files) {
   }
 }
 
+export async function verifyReleaseDirectory(directory, expectedTarball) {
+  const root = resolve(directory);
+  const entries = await readdir(root, { withFileTypes: true });
+  if (
+    entries.length !== 2 ||
+    entries.some(
+      (entry) =>
+        entry.name.startsWith(".") ||
+        !entry.isFile() ||
+        (entry.name !== "package-manifest.json" &&
+          !/^pegma-mail-(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.tgz$/u.test(
+            entry.name,
+          )),
+    )
+  ) {
+    fail("release output does not match the expected file inventory");
+  }
+  const names = entries.map(({ name }) => name).sort();
+  const tarballs = names.filter((name) => name.endsWith(".tgz"));
+  if (
+    !names.includes("package-manifest.json") ||
+    tarballs.length !== 1 ||
+    (expectedTarball !== undefined && tarballs[0] !== expectedTarball)
+  ) {
+    fail("release output does not match the expected file inventory");
+  }
+  for (const name of names) {
+    const metadata = await lstat(join(root, name));
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      fail("release output must contain regular files only");
+    }
+  }
+  return { tarball: tarballs[0] };
+}
+
 async function smokeTestTarball(tarball, manifest, registry) {
   const directory = await mkdtemp(join(tmpdir(), "mail-release-smoke-"));
   try {
@@ -802,11 +938,18 @@ async function smokeTestTarball(tarball, manifest, registry) {
         "--eval",
         `await import(${JSON.stringify(manifest.name)})`,
       ],
-      { cwd: directory, capture: true },
+      { cwd: directory, capture: true, env: isolatedNpmEnvironment() },
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+async function cleanPackageBuildOutputs(packageDirectory) {
+  await Promise.all([
+    rm(join(packageDirectory, "dist"), { recursive: true, force: true }),
+    rm(join(packageDirectory, "tsconfig.tsbuildinfo"), { force: true }),
+  ]);
 }
 
 export async function prepareRelease(options = {}) {
@@ -829,13 +972,20 @@ export async function prepareRelease(options = {}) {
     cwd: root,
     registry: options.registry,
   });
-  runPublicRegistryNpm(["run", "build"], {
-    cwd: root,
+  await cleanPackageBuildOutputs(packageDirectory);
+  runPublicRegistryNpm(["--prefix", packageDirectory, "run", "build"], {
     registry: options.registry,
   });
   const packedResult = runPublicRegistryNpm(
-    ["pack", packageDirectory, "--json", "--pack-destination", output],
-    { cwd: root, capture: true, registry: options.registry },
+    [
+      "pack",
+      packageDirectory,
+      "--ignore-scripts",
+      "--json",
+      "--pack-destination",
+      output,
+    ],
+    { capture: true, registry: options.registry },
   );
   const [packed] = JSON.parse(packedResult.stdout);
   if (
@@ -867,6 +1017,8 @@ export async function prepareRelease(options = {}) {
       tarball: basename(tarballPath),
       integrity: hashes.integrity,
       shasum: hashes.shasum,
+      sha256: hashes.sha256,
+      sha512: hashes.sha512,
       files: packed.files
         .map(({ path, size }) => ({ path, size }))
         .sort(
@@ -878,6 +1030,7 @@ export async function prepareRelease(options = {}) {
   };
   const manifestPath = join(output, "package-manifest.json");
   await writeFile(manifestPath, `${JSON.stringify(prepared, null, 2)}\n`);
+  await verifyReleaseDirectory(output, basename(tarballPath));
   return { manifestPath, manifest: prepared };
 }
 
@@ -959,9 +1112,7 @@ function validPreparedFiles(files) {
   const paths = [];
   for (const file of files) {
     if (
-      file === null ||
-      typeof file !== "object" ||
-      Array.isArray(file) ||
+      !hasExactKeys(file, ["path", "size"]) ||
       typeof file.path !== "string" ||
       !Number.isSafeInteger(file.size) ||
       file.size < 0
@@ -975,6 +1126,10 @@ function validPreparedFiles(files) {
 }
 
 async function verifyPrepared(path, mode) {
+  const manifestPath = resolve(path);
+  if (basename(manifestPath) !== "package-manifest.json") {
+    fail("prepared manifest must use the expected filename");
+  }
   const prepared = await readJson(path);
   const record = prepared.package;
   const releaseVersion =
@@ -987,16 +1142,32 @@ async function verifyPrepared(path, mode) {
       : bootstrapVersion &&
         (prepared.releaseTag === null || prepared.releaseTag === BOOTSTRAP_TAG);
   if (
+    !hasExactKeys(prepared, [
+      "schemaVersion",
+      "mode",
+      "gitCommit",
+      "releaseTag",
+      "package",
+    ]) ||
     prepared.schemaVersion !== 1 ||
     prepared.mode !== mode ||
-    !/^[0-9a-f]{40,64}$/u.test(prepared.gitCommit) ||
-    record === null ||
-    typeof record !== "object" ||
-    Array.isArray(record) ||
+    !/^[0-9a-f]{40}$/u.test(prepared.gitCommit) ||
+    !hasExactKeys(record, [
+      "name",
+      "version",
+      "tarball",
+      "integrity",
+      "shasum",
+      "sha256",
+      "sha512",
+      "files",
+    ]) ||
     !validTag ||
     record?.name !== PACKAGE.name ||
     typeof record.integrity !== "string" ||
     typeof record.shasum !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(record.sha256) ||
+    !/^[0-9a-f]{128}$/u.test(record.sha512) ||
     !validPreparedFiles(record.files)
   ) {
     fail("prepared package manifest is invalid");
@@ -1005,6 +1176,7 @@ async function verifyPrepared(path, mode) {
   if (record.tarball !== expectedTarball) {
     fail("prepared tarball name is invalid");
   }
+  await verifyReleaseDirectory(dirname(manifestPath), expectedTarball);
   const currentCommit = run(gitCommand(), ["rev-parse", "HEAD"], {
     cwd: rootDirectory(),
     capture: true,
@@ -1012,14 +1184,16 @@ async function verifyPrepared(path, mode) {
   if (!safeEqual(currentCommit, prepared.gitCommit)) {
     fail("prepared package manifest commit does not match the checkout");
   }
-  const tarball = resolve(dirname(path), record.tarball);
-  if (dirname(tarball) !== resolve(dirname(path))) {
+  const tarball = resolve(dirname(manifestPath), record.tarball);
+  if (dirname(tarball) !== resolve(dirname(manifestPath))) {
     fail("prepared tarball must be beside the package manifest");
   }
   const hashes = hashTarball(await readFile(tarball));
   if (
     !safeEqual(hashes.integrity, record.integrity) ||
-    !safeEqual(hashes.shasum, record.shasum)
+    !safeEqual(hashes.shasum, record.shasum) ||
+    !safeEqual(hashes.sha256, record.sha256) ||
+    !safeEqual(hashes.sha512, record.sha512)
   ) {
     fail("prepared tarball has changed");
   }
@@ -1086,7 +1260,7 @@ export async function publishPreparedRelease(options = {}) {
   if (
     releaseTag !== prepared.releaseTag ||
     expectedCommit === undefined ||
-    !/^[0-9a-f]{40,64}$/u.test(expectedCommit) ||
+    !/^[0-9a-f]{40}$/u.test(expectedCommit) ||
     !safeEqual(expectedCommit, prepared.gitCommit)
   ) {
     fail("prepared package must match the release event tag and commit");
@@ -1097,16 +1271,14 @@ export async function publishPreparedRelease(options = {}) {
     queryRegistryIntegrity(record.name, record.version),
   );
   if (decision === "skip") return;
-  runPublicRegistryNpm(
-    [
-      "publish",
-      resolve(dirname(manifestPath), record.tarball),
-      "--access",
-      "public",
-      "--provenance",
-    ],
-    { cwd: dirname(manifestPath) },
-  );
+  runPublicRegistryNpm([
+    "publish",
+    resolve(dirname(manifestPath), record.tarball),
+    "--access",
+    "public",
+    "--provenance",
+    "--ignore-scripts",
+  ]);
   const published = queryRegistryIntegrity(record.name, record.version);
   if (published === null || !safeEqual(published, record.integrity)) {
     fail("registry did not expose the exact prepared tarball integrity");

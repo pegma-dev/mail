@@ -157,21 +157,25 @@ signed annotated `vX.Y.Z` tag at the exact `origin/main` commit, then run:
 gh release create vX.Y.Z --verify-tag
 ```
 
-The workflow runs `release:check` before preparation, and the packer, prepared
-manifest verifier, registry decision, and minimal publisher independently
-enforce the same `>=0.1.0` boundary.
+Before either job reads repository files, workflow-owned commands validate the
+stable tag syntax, event commit, annotated SSH signature, and containment in
+protected main from a disposable bare repository. The preparation job then
+checks out the verified commit by its exact object ID with stored credentials
+disabled. It runs the metadata, format, type, and test gates before packing.
 
-The preparation job has no OIDC authority. It verifies the signer, tag,
-release-event commit, main ancestry, complete gate, package inventory,
-dependencies, audit, npm hashes, and clean-consumer import. It packs once.
+The packer removes prior build output and TypeScript incremental state, runs the
+package build once with isolated npm configuration, and packs those exact files
+with lifecycle scripts disabled. It records SHA-256 and SHA-512 digests,
+requires the exact two-file release directory, checks the package inventory and
+dependencies, and imports the tarball from a clean consumer. Empty private npm
+configuration files and a fresh working directory isolate each npm operation.
 
-The ordinary format, type, and test gate runs before `RELEASE_TAG`,
-`RELEASE_PRERELEASE`, and `RELEASE_COMMIT` are introduced. Those release-event
-variables are scoped only to the immediately following pack step, so a tagged
-workflow cannot change the meaning of repository tests.
-
-Only the final environment-scoped job receives `id-token: write`. It installs
-no dependencies and publishes the exact prepared tarball with provenance.
+Only the final environment-scoped job receives `id-token: write`. It never
+checks out repository contents and does not execute package scripts. Its
+workflow-owned validation repeats the tag checks, requires the exact manifest
+and tarball file inventory, validates the manifest identity and commit, and
+recomputes both digests before publishing the absolute tarball path with
+provenance and lifecycle scripts disabled.
 
 ## Registry safety
 

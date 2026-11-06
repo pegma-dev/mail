@@ -37,10 +37,13 @@ jobs:
         run: corepack enable
 
       - name: Use the reviewed npm release
-        run: npm install --global npm@11.18.0
+        run: npm install --global npm@11.18.0 --ignore-scripts --registry https://registry.npmjs.org/
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Check release metadata
+        run: pnpm run release:check
 
       - name: Check formatting
         run: pnpm run format:check

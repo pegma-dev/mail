@@ -1,9 +1,17 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   PACKAGE_FILES,
@@ -21,12 +29,14 @@ import {
   pnpmLockImporterHasSection,
   requirePnpmLockDependencies,
   requirePublicPackageLockDependencies,
+  resolveNpmCli,
   resolvedVersionMatchesSpecifier,
   validateBootstrapTag,
   validateReleaseTag,
   validateRepository,
   verifyPreparedBootstrapManifest,
   verifyPreparedManifest,
+  verifyReleaseDirectory,
 } from "../scripts/release-packages.mjs";
 
 async function startTestRegistry(
@@ -60,35 +70,8 @@ async function startTestRegistry(
   };
 }
 
-function isPnpmCli(path: string) {
-  const normalized = path.replaceAll("\\", "/").toLowerCase();
-  return (
-    normalized.includes("/pnpm/") ||
-    normalized.endsWith("/pnpm") ||
-    normalized.endsWith("/pnpm.cjs") ||
-    normalized.endsWith("/pnpm.js")
-  );
-}
-
 function reviewedNpmExecPath() {
-  const fromEnv = process.env["npm_execpath"];
-  if (fromEnv !== undefined && !isPnpmCli(fromEnv)) return fromEnv;
-  const bundled = join(
-    dirname(process.execPath),
-    "node_modules",
-    "npm",
-    "bin",
-    "npm-cli.js",
-  );
-  if (existsSync(bundled)) return bundled;
-  const which = spawnSync("which", ["npm"], { encoding: "utf8" });
-  const npmBin = which.stdout.trim().split("\n")[0];
-  if (which.status === 0 && npmBin !== undefined && npmBin.length > 0) {
-    const nearby = join(dirname(npmBin), "..", "npm", "bin", "npm-cli.js");
-    if (existsSync(nearby)) return nearby;
-    return npmBin;
-  }
-  return bundled;
+  return resolveNpmCli();
 }
 
 function cleanNpmEnvironment() {
@@ -103,6 +86,45 @@ function cleanNpmEnvironment() {
       );
     }),
   );
+}
+
+function workflowRunScripts(workflow: string) {
+  const lines = workflow.split("\n");
+  const scripts: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const match = /^(\s*)run:\s*(.*)$/u.exec(line);
+    if (match === null) continue;
+    const indent = match[1]?.length ?? 0;
+    const value = match[2] ?? "";
+    if (value !== "|") {
+      scripts.push(value);
+      continue;
+    }
+    const body: string[] = [];
+    while (index + 1 < lines.length) {
+      const next = lines[index + 1] ?? "";
+      const nextIndent = /^\s*/u.exec(next)?.[0].length ?? 0;
+      if (next.trim() !== "" && nextIndent <= indent) break;
+      body.push(next);
+      index += 1;
+    }
+    scripts.push(body.join("\n"));
+  }
+  return scripts;
+}
+
+function workflowPublishValidator(workflow: string) {
+  const match = /          node <<'NODE'\n([\s\S]*?)\n          NODE/u.exec(
+    workflow,
+  );
+  if (match?.[1] === undefined) {
+    throw new Error("publish validator was not found");
+  }
+  return match[1]
+    .split("\n")
+    .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+    .join("\n");
 }
 
 async function writePreparedReleaseFixture(directory: string, version: string) {
@@ -132,11 +154,65 @@ async function writePreparedReleaseFixture(directory: string, version: string) {
           .update(tarballBytes)
           .digest("base64")}`,
         shasum: createHash("sha1").update(tarballBytes).digest("hex"),
+        sha256: createHash("sha256").update(tarballBytes).digest("hex"),
+        sha512: createHash("sha512").update(tarballBytes).digest("hex"),
         files: PACKAGE_FILES.map((path) => ({ path, size: 1 })),
       },
     }),
   );
   return manifestPath;
+}
+
+async function writeWorkflowNpmFixture(directory: string) {
+  const shimDirectory = join(directory, "shim");
+  const binDirectory = join(directory, "bin");
+  const npmCli =
+    process.platform === "win32"
+      ? join(binDirectory, "node_modules", "npm", "bin", "npm-cli.js")
+      : join(binDirectory, "npm");
+  await mkdir(dirname(npmCli), { recursive: true });
+  await writeFile(
+    npmCli,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const statePath = process.env.GITHUB_TEST_NPM_STATE;
+if (!statePath) throw new Error("test state is unavailable");
+const arguments_ = process.argv.slice(2);
+if (arguments_[0] === "--version") {
+  process.stdout.write("11.18.0\\n");
+  process.exit(0);
+}
+const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+if (arguments_[0] === "view") {
+  const response = state.views.shift();
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  if (response === "missing") {
+    process.stderr.write("npm ERR! code E404\\n");
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify(response));
+  process.exit(0);
+}
+if (arguments_[0] === "publish") {
+  state.publishCount += 1;
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  process.exit(0);
+}
+throw new Error(\`unexpected npm arguments: \${arguments_.join(" ")}\`);
+`,
+  );
+  if (process.platform === "win32") {
+    await mkdir(shimDirectory);
+    await writeFile(join(shimDirectory, "npm.cmd"), "@echo off\r\n");
+    await writeFile(join(binDirectory, "npm.cmd"), "@echo off\r\n");
+  } else {
+    await mkdir(shimDirectory);
+    const shim = join(shimDirectory, "npm");
+    await writeFile(shim, "#!/bin/sh\nexit 1\n");
+    await chmod(shim, 0o755);
+    await chmod(npmCli, 0o755);
+  }
+  return `${shimDirectory}${delimiter}${binDirectory}`;
 }
 
 async function writeReleaseRepositoryFixture(
@@ -209,6 +285,7 @@ async function writeBootstrapRepositoryFixture(directory: string) {
     symlink(
       join(sourceRoot, "packages", "mail", "node_modules"),
       join(directory, "packages", "mail", "node_modules"),
+      process.platform === "win32" ? "junction" : "dir",
     ),
   ]);
   return directory;
@@ -393,6 +470,25 @@ describe("release package metadata", () => {
     });
   });
 
+  it("resolves the PATH npm when invoked through pnpm", () => {
+    const original = process.env["npm_execpath"];
+    try {
+      process.env["npm_execpath"] = join(tmpdir(), "pnpm", "pnpm.cjs");
+      const version = spawnSync(
+        process.execPath,
+        [resolveNpmCli(), "--version"],
+        {
+          encoding: "utf8",
+        },
+      );
+      expect(version.status).toBe(0);
+      expect(version.stdout.trim()).toBe("11.18.0");
+    } finally {
+      if (original === undefined) delete process.env["npm_execpath"];
+      else process.env["npm_execpath"] = original;
+    }
+  });
+
   it("gives every bootstrap shortcut its safe artifact default", () => {
     const rootManifest = JSON.parse(
       readFileSync(join(process.cwd(), "package.json"), "utf8"),
@@ -407,7 +503,7 @@ describe("release package metadata", () => {
     });
   });
 
-  it("keeps every resolved uuid past the buffer-bounds advisory", () => {
+  it("keeps every resolved uuid at the required version", () => {
     const rootManifest = JSON.parse(
       readFileSync(join(process.cwd(), "package.json"), "utf8"),
     ) as { overrides: Record<string, string> };
@@ -673,6 +769,55 @@ describe("release package metadata", () => {
     }
   });
 
+  it.each(["extra.txt", ".extra"])(
+    "rejects an unexpected release entry named %s",
+    async (entry) => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "pegma-mail-release-inventory-test-"),
+      );
+      try {
+        await writePreparedReleaseFixture(directory, "0.1.0");
+        await writeFile(join(directory, entry), "unexpected\n");
+        await expect(verifyReleaseDirectory(directory)).rejects.toThrow(
+          "expected file inventory",
+        );
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("rejects a linked release entry", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-release-inventory-test-"),
+    );
+    const releaseDirectory = join(directory, "release");
+    try {
+      await mkdir(releaseDirectory);
+      const manifest = await writePreparedReleaseFixture(
+        releaseDirectory,
+        "0.1.0",
+      );
+      const record = JSON.parse(readFileSync(manifest, "utf8")) as {
+        package: { tarball: string };
+      };
+      const tarball = join(releaseDirectory, record.package.tarball);
+      const target = join(directory, "target");
+      await mkdir(target);
+      await rm(tarball);
+      await symlink(
+        target,
+        tarball,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await expect(verifyReleaseDirectory(releaseDirectory)).rejects.toThrow(
+        "expected file inventory",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("verifies every supplied manifest before the first registry query", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "pegma-mail-registry-order-test-"),
@@ -814,10 +959,19 @@ describe("release package metadata", () => {
     const root = join(directory, "repository");
     try {
       await writeBootstrapRepositoryFixture(root);
+      const staleOutput = join(root, "packages", "mail", "dist", "stale.js");
+      const buildState = join(root, "packages", "mail", "tsconfig.tsbuildinfo");
+      await mkdir(dirname(staleOutput), { recursive: true });
+      await writeFile(staleOutput, "stale output\n");
+      await writeFile(buildState, "stale build state\n");
       const prepared = await prepareBootstrap({
         root,
         output: join(directory, "output"),
       });
+      expect(existsSync(staleOutput)).toBe(false);
+      expect(readFileSync(buildState, "utf8")).not.toContain(
+        "stale build state",
+      );
       const record = prepared.manifest as {
         package: { integrity: string };
       };
@@ -870,7 +1024,10 @@ describe("release package metadata", () => {
           '  return normalized.startsWith("npm_config_") ||',
           '    normalized === "node_auth_token" ||',
           '    normalized === "npm_token" ||',
-          '    normalized === "npm_auth_token";',
+          '    normalized === "npm_auth_token" ||',
+          '    normalized === "node_options" ||',
+          '    normalized === "node_extra_ca_certs" ||',
+          '    normalized.endsWith("_proxy");',
           "});",
           "if (leaked) {",
           '  process.stderr.write("npm credentials or configuration leaked\\n");',
@@ -891,6 +1048,10 @@ describe("release package metadata", () => {
         "NODE_AUTH_TOKEN",
         "NPM_TOKEN",
         "NPM_AUTH_TOKEN",
+        "NODE_OPTIONS",
+        "NODE_EXTRA_CA_CERTS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
       ];
       const originalHostileEnvironment = new Map(
         hostileEnvironment.map((key) => [key, process.env[key]]),
@@ -902,6 +1063,10 @@ describe("release package metadata", () => {
         process.env["NODE_AUTH_TOKEN"] = "must-not-leak";
         process.env["NPM_TOKEN"] = "must-not-leak";
         process.env["NPM_AUTH_TOKEN"] = "must-not-leak";
+        process.env["NODE_OPTIONS"] = "--require=must-not-load";
+        process.env["NODE_EXTRA_CA_CERTS"] = "must-not-load.pem";
+        process.env["HTTP_PROXY"] = "http://127.0.0.1:1";
+        process.env["HTTPS_PROXY"] = "http://127.0.0.1:1";
         process.env["FAKE_NPM_INTEGRITY"] = "absent";
         await expect(
           checkBootstrapRegistry({ root, manifest: prepared.manifestPath }),
@@ -1035,6 +1200,10 @@ describe("release package metadata", () => {
       "NODE_AUTH_TOKEN",
       "NPM_TOKEN",
       "NPM_AUTH_TOKEN",
+      "NODE_OPTIONS",
+      "NODE_EXTRA_CA_CERTS",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
     ];
     const originalEnvironment = new Map(
       environmentKeys.map((key) => [key, process.env[key]]),
@@ -1054,6 +1223,11 @@ describe("release package metadata", () => {
       process.env["NODE_AUTH_TOKEN"] = "must-not-leak";
       process.env["NPM_TOKEN"] = "must-not-leak";
       process.env["NPM_AUTH_TOKEN"] = "must-not-leak";
+      process.env["NODE_OPTIONS"] = "--require=must-not-load";
+      process.env["NODE_EXTRA_CA_CERTS"] = "must-not-load.pem";
+      process.env["HTTP_PROXY"] = hostile.url;
+      process.env["HTTPS_PROXY"] = hostile.url;
+      process.env["npm_execpath"] = join(directory, "pnpm", "pnpm.cjs");
       const isolated = await prepareBootstrap({
         root,
         output: join(directory, "isolated"),
@@ -1142,18 +1316,37 @@ describe("release package metadata", () => {
     expect(prepare).not.toContain("id-token: write");
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
-    expect(publish).not.toContain("npm install");
+    expect(publish).toContain(
+      "npm install --global npm@11.18.0 --ignore-scripts",
+    );
     expect(publish).not.toContain("pnpm install");
     expect(publish).not.toContain("corepack");
     expect(publish).not.toContain("pnpm run");
-    expect(publish).toContain("npm run release:publish");
+    expect(publish).not.toContain("actions/checkout");
+    expect(publish).toContain("node <<'NODE'");
+    expect(publish).toContain('"--ignore-scripts"');
+    expect(publish).toContain('"--provenance"');
+    expect(publish).toContain('"--registry", "https://registry.npmjs.org/"');
+    expect(publish).toContain(
+      'fs.writeFileSync(userConfig, "", { mode: 0o600 })',
+    );
+    expect(publish).toContain('lower.endsWith("_proxy")');
+    expect(publish).toContain(
+      'String(npmVersion.stdout || "").trim() === "11.18.0"',
+    );
+    expect(publish).toContain("queryRegistryIntegrity");
+    expect(publish).toContain("existingIntegrity === record.integrity");
+    expect(publish).toContain("publishedIntegrity === record.integrity");
+    expect(publish).toContain(
+      "postPublishDelays = [0, 1000, 2000, 4000, 8000]",
+    );
     expect(prepare).toContain("pnpm run release:check");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).not.toContain("NODE_AUTH_TOKEN");
     expect(workflow).not.toContain("bootstrap:");
   });
 
-  it("checks the release version before every registry-backed workflow step", () => {
+  it("verifies release refs before checking out repository files", () => {
     const workflow = readFileSync(
       join(process.cwd(), ".github", "workflows", "publish.yml"),
       "utf8",
@@ -1162,18 +1355,205 @@ describe("release package metadata", () => {
       workflow.indexOf("  prepare:"),
       workflow.indexOf("\n  publish:"),
     );
-    const setupNode = prepare.indexOf("- name: Set up Node.js");
-    const releaseCheck = prepare.indexOf(
-      "- name: Require an advertised release version",
+    const verification = prepare.indexOf("- name: Verify the release ref");
+    const checkout = prepare.indexOf("- name: Check out the verified commit");
+    expect(verification).toBeGreaterThan(-1);
+    expect(checkout).toBeGreaterThan(verification);
+    expect(prepare.slice(verification, checkout)).toContain("git init --bare");
+    expect(prepare.slice(verification, checkout)).toContain("verify-tag");
+    expect(prepare.slice(verification, checkout)).toContain(
+      "merge-base --is-ancestor",
     );
-    const installNpm = prepare.indexOf("- name: Use the reviewed npm release");
-    const installDependencies = prepare.indexOf("- name: Install dependencies");
-    const completeGate = prepare.indexOf("- name: Run the complete gate");
-    expect(setupNode).toBeGreaterThan(-1);
-    expect(releaseCheck).toBeGreaterThan(setupNode);
-    for (const laterStep of [installNpm, installDependencies, completeGate]) {
-      expect(laterStep).toBeGreaterThan(releaseCheck);
+    expect(prepare).toContain("ref: ${{ github.sha }}");
+    expect(prepare).toContain("persist-credentials: false");
+    expect(prepare.indexOf("pnpm install --frozen-lockfile")).toBeGreaterThan(
+      checkout,
+    );
+  });
+
+  it("passes workflow expressions outside run scripts", () => {
+    const workflow = readFileSync(
+      join(process.cwd(), ".github", "workflows", "publish.yml"),
+      "utf8",
+    );
+    expect(workflow).toContain(
+      "RELEASE_TAG: ${{ github.event.release.tag_name }}",
+    );
+    expect(workflow).toContain(
+      "RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}",
+    );
+    expect(workflow).toContain("RELEASE_COMMIT: ${{ github.sha }}");
+    expect(workflow).toContain(
+      "RELEASE_ALLOWED_SIGNERS: ${{ vars.RELEASE_ALLOWED_SIGNERS }}",
+    );
+    expect(workflowRunScripts(workflow)).not.toEqual([]);
+    for (const script of workflowRunScripts(workflow)) {
+      expect(script).not.toContain("${{");
     }
+  });
+
+  it("keeps release validation and exact file upload in the workflow", () => {
+    const workflow = readFileSync(
+      join(process.cwd(), ".github", "workflows", "publish.yml"),
+      "utf8",
+    );
+    expect(workflow.match(/git init --bare/gu)).toHaveLength(2);
+    expect(workflow.match(/git -C "\$\{scratch\}" verify-tag/gu)).toHaveLength(
+      2,
+    );
+    expect(workflow).toContain("include-hidden-files: false");
+    expect(workflow).toContain(".release/package-manifest.json");
+    expect(workflow).toContain("${{ steps.release_files.outputs.tarball }}");
+    expect(workflow).not.toContain(".release/pegma-mail-*.tgz");
+    expect(workflow).toContain('createHash("sha256")');
+    expect(workflow).toContain('createHash("sha512")');
+  });
+
+  it("executes the workflow-owned release validator", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-workflow-validator-test-"),
+    );
+    const releaseDirectory = join(directory, ".release");
+    try {
+      await mkdir(releaseDirectory);
+      const manifestPath = await writePreparedReleaseFixture(
+        releaseDirectory,
+        "0.1.0",
+      );
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        gitCommit: string;
+        releaseTag: string;
+        package: { sha256: string };
+      };
+      const workflow = readFileSync(
+        join(process.cwd(), ".github", "workflows", "publish.yml"),
+        "utf8",
+      );
+      const validator = join(directory, "publish-validator.cjs");
+      await writeFile(validator, `${workflowPublishValidator(workflow)}\n`);
+      const validate = () =>
+        spawnSync(process.execPath, [validator, "--validate-only"], {
+          cwd: directory,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            RELEASE_COMMIT: manifest.gitCommit,
+            RELEASE_TAG: manifest.releaseTag,
+          },
+        });
+
+      const valid = validate();
+      expect(valid.status, valid.stderr).toBe(0);
+      expect(valid.stdout).toContain("Prepared release files are valid.");
+
+      const extra = join(releaseDirectory, ".extra");
+      await writeFile(extra, "unexpected\n");
+      const unexpected = validate();
+      expect(unexpected.status).not.toBe(0);
+      expect(unexpected.stderr).toContain("expected file inventory");
+      await rm(extra);
+
+      manifest.package.sha256 = "0".repeat(64);
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      const changed = validate();
+      expect(changed.status).not.toBe(0);
+      expect(changed.stderr).toContain("digests do not match");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("executes the workflow-owned registry decision paths", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-workflow-publish-test-"),
+    );
+    const releaseDirectory = join(directory, ".release");
+    try {
+      await mkdir(releaseDirectory);
+      const manifestPath = await writePreparedReleaseFixture(
+        releaseDirectory,
+        "0.1.0",
+      );
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        gitCommit: string;
+        releaseTag: string;
+        package: { integrity: string };
+      };
+      const workflow = readFileSync(
+        join(process.cwd(), ".github", "workflows", "publish.yml"),
+        "utf8",
+      );
+      const validator = join(directory, "publish-validator.cjs");
+      const statePath = join(directory, "npm-state.json");
+      const npmPath = await writeWorkflowNpmFixture(directory);
+      await writeFile(validator, `${workflowPublishValidator(workflow)}\n`);
+      const environment = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => key.toLowerCase() !== "path",
+        ),
+      );
+      environment["PATH"] =
+        `${npmPath}${delimiter}${process.env["PATH"] ?? ""}`;
+      environment["RELEASE_COMMIT"] = manifest.gitCommit;
+      environment["RELEASE_TAG"] = manifest.releaseTag;
+      environment["GITHUB_TEST_NPM_STATE"] = statePath;
+      const run = async (views: string[]) => {
+        await writeFile(statePath, JSON.stringify({ publishCount: 0, views }));
+        const result = spawnSync(process.execPath, [validator], {
+          cwd: directory,
+          encoding: "utf8",
+          env: environment,
+        });
+        const state = JSON.parse(readFileSync(statePath, "utf8")) as {
+          publishCount: number;
+          views: string[];
+        };
+        return { result, state };
+      };
+
+      const alreadyPublished = await run([manifest.package.integrity]);
+      expect(
+        alreadyPublished.result.status,
+        alreadyPublished.result.stderr,
+      ).toBe(0);
+      expect(alreadyPublished.result.stdout).toContain(
+        "The exact package version is already published.",
+      );
+      expect(alreadyPublished.state.publishCount).toBe(0);
+
+      const different = await run(["sha512-different"]);
+      expect(different.result.status).not.toBe(0);
+      expect(different.result.stderr).toContain(
+        "the registry version has different tarball integrity",
+      );
+      expect(different.state.publishCount).toBe(0);
+
+      const published = await run(["missing", manifest.package.integrity]);
+      expect(published.result.status, published.result.stderr).toBe(0);
+      expect(published.state.publishCount).toBe(1);
+      expect(published.state.views).toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans once, builds once, and packs without lifecycle scripts", () => {
+    const source = readFileSync(
+      join(process.cwd(), "scripts", "release-packages.mjs"),
+      "utf8",
+    );
+    const prepare = source.slice(
+      source.indexOf("export async function prepareRelease"),
+      source.indexOf("export async function prepareBootstrap"),
+    );
+    expect(prepare.match(/cleanPackageBuildOutputs/gu)).toHaveLength(1);
+    expect(prepare.indexOf('"run", "build"')).toBeGreaterThan(
+      prepare.indexOf("cleanPackageBuildOutputs"),
+    );
+    expect(prepare.indexOf('"pack"')).toBeGreaterThan(
+      prepare.indexOf('"run", "build"'),
+    );
+    expect(prepare).toContain('"--ignore-scripts"');
   });
 
   it("installs the reviewed npm before every CI matrix gate", () => {
@@ -1184,8 +1564,9 @@ describe("release package metadata", () => {
     expect(workflow).toContain("          - 22");
     expect(workflow).toContain("          - 24");
     expect(workflow).toContain("run: corepack enable");
+    expect(workflow).toContain("run: pnpm run release:check");
     const installNpm = workflow.indexOf(
-      "run: npm install --global npm@11.18.0",
+      "run: npm install --global npm@11.18.0 --ignore-scripts --registry https://registry.npmjs.org/",
     );
     const installDependencies = workflow.indexOf(
       "run: pnpm install --frozen-lockfile",

@@ -47,6 +47,7 @@ export function publicRegistryArguments(
   arguments_: readonly string[],
   registry?: string,
 ): string[];
+export function resolveNpmCli(): string;
 export function parseArguments(
   arguments_: readonly string[],
 ): ValidationOptions;
@@ -55,6 +56,10 @@ export function validateRepository(
 ): Promise<unknown>;
 export function verifyPreparedManifest(path: string): Promise<unknown>;
 export function verifyPreparedBootstrapManifest(path: string): Promise<unknown>;
+export function verifyReleaseDirectory(
+  directory: string,
+  expectedTarball?: string,
+): Promise<{ tarball: string }>;
 export function verifyBootstrapPreparation(
   options?: ValidationOptions,
 ): Promise<unknown>;
