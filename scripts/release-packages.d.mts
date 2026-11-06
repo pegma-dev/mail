@@ -47,6 +47,7 @@ export function publicRegistryArguments(
   arguments_: readonly string[],
   registry?: string,
 ): string[];
+export function resolveNpmCli(): string;
 export function parseArguments(
   arguments_: readonly string[],
 ): ValidationOptions;

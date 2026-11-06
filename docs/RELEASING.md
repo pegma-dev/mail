@@ -163,11 +163,12 @@ protected main from a disposable bare repository. The preparation job then
 checks out the verified commit by its exact object ID with stored credentials
 disabled. It runs the metadata, format, type, and test gates before packing.
 
-The packer removes prior build output and TypeScript incremental state before a
-fresh build. It records SHA-256 and SHA-512 digests, requires the exact two-file
-release directory, checks the package inventory and dependencies, and imports
-the tarball from a clean consumer. Empty private npm configuration files and a
-fresh working directory isolate each npm operation.
+The packer removes prior build output and TypeScript incremental state, runs the
+package build once with isolated npm configuration, and packs those exact files
+with lifecycle scripts disabled. It records SHA-256 and SHA-512 digests,
+requires the exact two-file release directory, checks the package inventory and
+dependencies, and imports the tarball from a clean consumer. Empty private npm
+configuration files and a fresh working directory isolate each npm operation.
 
 Only the final environment-scoped job receives `id-token: write`. It never
 checks out repository contents and does not execute package scripts. Its

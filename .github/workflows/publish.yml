@@ -34,7 +34,7 @@ jobs:
             echo "::error::Only stable releases can be prepared"
             exit 1
           fi
-          if [[ ! "${RELEASE_TAG}" =~ ^v(0\.[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)\.[0-9]+$ ]]; then
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0\.[1-9][0-9]*|[1-9][0-9]*\.(0|[1-9][0-9]*))\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::The release tag is not a stable package tag"
             exit 1
           fi
@@ -78,6 +78,14 @@ jobs:
         run: |
           set -euo pipefail
           allowed_signers="${RUNNER_TEMP}/release-allowed-signers-${GITHUB_RUN_ID}"
+          if [[ -z "${RELEASE_ALLOWED_SIGNERS}" ]]; then
+            echo "::error::RELEASE_ALLOWED_SIGNERS must contain reviewed SSH allowed-signers entries"
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "${RELEASE_ALLOWED_SIGNERS}" > "${allowed_signers}"
+          chmod 0600 "${allowed_signers}"
+          test -f "${allowed_signers}"
           git config --local gpg.format ssh
           git config --local gpg.ssh.allowedSignersFile "${allowed_signers}"
           git fetch --no-tags --force origin \
@@ -112,7 +120,14 @@ jobs:
         run: pnpm test
 
       - name: Prepare the release files
-        run: pnpm run release:pack -- -- --require-clean --require-main-ancestor --require-release-tag --expected-release-commit "${RELEASE_COMMIT}" --output .release
+        id: release_files
+        run: |
+          set -euo pipefail
+          pnpm run release:pack -- -- --require-clean --require-main-ancestor --require-release-tag --expected-release-commit "${RELEASE_COMMIT}" --output .release
+          release_tarball=".release/pegma-mail-${RELEASE_TAG#v}.tgz"
+          test -f "${release_tarball}"
+          test ! -L "${release_tarball}"
+          printf 'tarball=%s\n' "${release_tarball}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload the prepared release
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
@@ -120,7 +135,7 @@ jobs:
           name: mail-release-${{ github.run_id }}
           path: |
             .release/package-manifest.json
-            .release/pegma-mail-*.tgz
+            ${{ steps.release_files.outputs.tarball }}
           if-no-files-found: error
           include-hidden-files: false
           overwrite: true
@@ -150,7 +165,7 @@ jobs:
             echo "::error::Only stable releases can be published"
             exit 1
           fi
-          if [[ ! "${RELEASE_TAG}" =~ ^v(0\.[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)\.[0-9]+$ ]]; then
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0\.[1-9][0-9]*|[1-9][0-9]*\.(0|[1-9][0-9]*))\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::The release tag is not a stable package tag"
             exit 1
           fi
@@ -187,6 +202,9 @@ jobs:
         with:
           node-version: 24.18.0
           package-manager-cache: false
+
+      - name: Use the reviewed npm release
+        run: npm install --global npm@11.18.0 --ignore-scripts --registry https://registry.npmjs.org/
 
       - name: Download the prepared release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -234,7 +252,7 @@ jobs:
               manifest.schemaVersion !== 1 || manifest.mode !== "release" ||
               !/^[0-9a-f]{40}$/u.test(manifest.gitCommit) ||
               record.name !== "@pegma/mail" ||
-              !/^(0\.[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)\.[0-9]+$/u.test(record.version) ||
+              !/^(0\.[1-9][0-9]*|[1-9][0-9]*\.(0|[1-9][0-9]*))\.(0|[1-9][0-9]*)$/u.test(record.version) ||
               manifest.releaseTag !== `v${record.version}` || manifest.releaseTag !== process.env.RELEASE_TAG ||
               manifest.gitCommit !== process.env.RELEASE_COMMIT ||
               record.tarball !== `pegma-mail-${record.version}.tgz` ||
@@ -255,6 +273,10 @@ jobs:
           const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
           if (record.shasum !== sha1 || record.sha256 !== sha256 || record.sha512 !== sha512 || record.integrity !== integrity) {
             fail("prepared tarball digests do not match");
+          }
+          if (process.argv.includes("--validate-only")) {
+            process.stdout.write("Prepared release files are valid.\n");
+            process.exit(0);
           }
 
           const npmLookup = spawnSync("which", ["npm"], { encoding: "utf8", shell: false });
@@ -285,18 +307,47 @@ jobs:
             const npmVersion = spawnSync(process.execPath, [npmCli, "--version"], {
               cwd, env: environment, encoding: "utf8", shell: false,
             });
-            const versionMatch = /^(\d+)\.(\d+)\.(\d+)/u.exec(String(npmVersion.stdout || "").trim());
-            if (npmVersion.status !== 0 || versionMatch === null || Number(versionMatch[1]) < 11 ||
-                (Number(versionMatch[1]) === 11 && Number(versionMatch[2]) < 5) ||
-                (Number(versionMatch[1]) === 11 && Number(versionMatch[2]) === 5 && Number(versionMatch[3]) < 1)) {
-              fail("npm 11.5.1 or newer is required");
+            if (npmVersion.status !== 0 || String(npmVersion.stdout || "").trim() !== "11.18.0") {
+              fail("npm 11.18.0 is required");
             }
-            const result = spawnSync(process.execPath, [npmCli, "publish", tarball,
-              "--access", "public", "--registry", "https://registry.npmjs.org/",
-              "--provenance", "--ignore-scripts", "--userconfig", userConfig,
-              "--globalconfig", globalConfig], { cwd, env: environment, stdio: "inherit", shell: false });
-            if (result.error) throw result.error;
-            if (result.status !== 0) fail(`npm publish exited with ${String(result.status)}`);
+            const registryArguments = ["--registry", "https://registry.npmjs.org/",
+              "--userconfig", userConfig, "--globalconfig", globalConfig];
+            const queryRegistryIntegrity = () => {
+              const result = spawnSync(process.execPath, [npmCli, "view",
+                `${record.name}@${record.version}`, "dist.integrity", "--json",
+                "--prefer-online", ...registryArguments], {
+                cwd, env: environment, encoding: "utf8", shell: false,
+              });
+              if (result.error) throw result.error;
+              if (result.status === 0) {
+                const publishedIntegrity = JSON.parse(result.stdout);
+                if (typeof publishedIntegrity !== "string" || publishedIntegrity.length === 0) {
+                  fail("the registry version has no integrity value");
+                }
+                return publishedIntegrity;
+              }
+              const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+              if (/\bE404\b/u.test(output)) return null;
+              fail(`npm registry lookup exited with ${String(result.status)}: ${output.trim()}`);
+            };
+            const existingIntegrity = queryRegistryIntegrity();
+            if (existingIntegrity !== null && existingIntegrity !== record.integrity) {
+              fail("the registry version has different tarball integrity");
+            }
+            if (existingIntegrity === record.integrity) {
+              process.stdout.write("The exact package version is already published.\n");
+            } else {
+              const result = spawnSync(process.execPath, [npmCli, "publish", tarball,
+                "--access", "public", "--registry", "https://registry.npmjs.org/",
+                "--provenance", "--ignore-scripts", "--userconfig", userConfig,
+                "--globalconfig", globalConfig], { cwd, env: environment, stdio: "inherit", shell: false });
+              if (result.error) throw result.error;
+              if (result.status !== 0) fail(`npm publish exited with ${String(result.status)}`);
+              const publishedIntegrity = queryRegistryIntegrity();
+              if (publishedIntegrity !== record.integrity) {
+                fail("the registry did not return the prepared tarball integrity");
+              }
+            }
           } finally {
             fs.rmSync(temporaryRoot, { recursive: true, force: true });
           }

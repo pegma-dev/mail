@@ -116,7 +116,7 @@ function isPnpmCli(path) {
   );
 }
 
-function resolveNpmCli() {
+export function resolveNpmCli() {
   const configured = process.env.npm_execpath;
   if (
     configured !== undefined &&
@@ -125,18 +125,7 @@ function resolveNpmCli() {
   ) {
     return configured;
   }
-  const candidates = [
-    join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
-    join(
-      dirname(process.execPath),
-      "..",
-      "lib",
-      "node_modules",
-      "npm",
-      "bin",
-      "npm-cli.js",
-    ),
-  ];
+  const candidates = [];
   const lookup = spawnSync(
     process.platform === "win32" ? "where.exe" : "which",
     [process.platform === "win32" ? "npm.cmd" : "npm"],
@@ -153,6 +142,25 @@ function resolveNpmCli() {
       }
     }
   }
+  candidates.push(
+    process.platform === "win32"
+      ? join(
+          dirname(process.execPath),
+          "node_modules",
+          "npm",
+          "bin",
+          "npm-cli.js",
+        )
+      : join(
+          dirname(process.execPath),
+          "..",
+          "lib",
+          "node_modules",
+          "npm",
+          "bin",
+          "npm-cli.js",
+        ),
+  );
   const cli = candidates.find((candidate) => existsSync(candidate));
   if (cli === undefined) fail("could not resolve the npm CLI");
   return cli;
@@ -954,12 +962,18 @@ export async function prepareRelease(options = {}) {
     registry: options.registry,
   });
   await cleanPackageBuildOutputs(packageDirectory);
-  runPublicRegistryNpm(["--prefix", root, "run", "build"], {
+  runPublicRegistryNpm(["--prefix", packageDirectory, "run", "build"], {
     registry: options.registry,
   });
-  await cleanPackageBuildOutputs(packageDirectory);
   const packedResult = runPublicRegistryNpm(
-    ["pack", packageDirectory, "--json", "--pack-destination", output],
+    [
+      "pack",
+      packageDirectory,
+      "--ignore-scripts",
+      "--json",
+      "--pack-destination",
+      output,
+    ],
     { capture: true, registry: options.registry },
   );
   const [packed] = JSON.parse(packedResult.stdout);

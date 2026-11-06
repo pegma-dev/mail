@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -21,6 +21,7 @@ import {
   pnpmLockImporterHasSection,
   requirePnpmLockDependencies,
   requirePublicPackageLockDependencies,
+  resolveNpmCli,
   resolvedVersionMatchesSpecifier,
   validateBootstrapTag,
   validateReleaseTag,
@@ -74,22 +75,33 @@ function isPnpmCli(path: string) {
 function reviewedNpmExecPath() {
   const fromEnv = process.env["npm_execpath"];
   if (fromEnv !== undefined && !isPnpmCli(fromEnv)) return fromEnv;
-  const bundled = join(
+  const lookup = spawnSync(
+    process.platform === "win32" ? "where.exe" : "which",
+    [process.platform === "win32" ? "npm.cmd" : "npm"],
+    { encoding: "utf8", shell: false },
+  );
+  if (lookup.status === 0) {
+    const executable = lookup.stdout.trim().split(/\r?\n/u)[0];
+    if (executable !== undefined && executable.length > 0) {
+      if (process.platform !== "win32") return realpathSync(executable);
+      const nearby = join(
+        dirname(executable),
+        "node_modules",
+        "npm",
+        "bin",
+        "npm-cli.js",
+      );
+      if (existsSync(nearby)) return nearby;
+    }
+  }
+  return join(
     dirname(process.execPath),
-    "node_modules",
+    process.platform === "win32" ? "node_modules" : "..",
+    ...(process.platform === "win32" ? [] : ["lib", "node_modules"]),
     "npm",
     "bin",
     "npm-cli.js",
   );
-  if (existsSync(bundled)) return bundled;
-  const which = spawnSync("which", ["npm"], { encoding: "utf8" });
-  const npmBin = which.stdout.trim().split("\n")[0];
-  if (which.status === 0 && npmBin !== undefined && npmBin.length > 0) {
-    const nearby = join(dirname(npmBin), "..", "npm", "bin", "npm-cli.js");
-    if (existsSync(nearby)) return nearby;
-    return npmBin;
-  }
-  return bundled;
 }
 
 function cleanNpmEnvironment() {
@@ -130,6 +142,19 @@ function workflowRunScripts(workflow: string) {
     scripts.push(body.join("\n"));
   }
   return scripts;
+}
+
+function workflowPublishValidator(workflow: string) {
+  const match = /          node <<'NODE'\n([\s\S]*?)\n          NODE/u.exec(
+    workflow,
+  );
+  if (match?.[1] === undefined) {
+    throw new Error("publish validator was not found");
+  }
+  return match[1]
+    .split("\n")
+    .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+    .join("\n");
 }
 
 async function writePreparedReleaseFixture(directory: string, version: string) {
@@ -421,6 +446,17 @@ describe("release package metadata", () => {
     expect(parseArguments(["--require-bootstrap-tag"])).toEqual({
       requireBootstrapTag: true,
     });
+  });
+
+  it("resolves the PATH npm when invoked through pnpm", () => {
+    const original = process.env["npm_execpath"];
+    try {
+      process.env["npm_execpath"] = join(tmpdir(), "pnpm", "pnpm.cjs");
+      expect(resolveNpmCli()).toBe(reviewedNpmExecPath());
+    } finally {
+      if (original === undefined) delete process.env["npm_execpath"];
+      else process.env["npm_execpath"] = original;
+    }
   });
 
   it("gives every bootstrap shortcut its safe artifact default", () => {
@@ -1250,7 +1286,9 @@ describe("release package metadata", () => {
     expect(prepare).not.toContain("id-token: write");
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
-    expect(publish).not.toContain("npm install");
+    expect(publish).toContain(
+      "npm install --global npm@11.18.0 --ignore-scripts",
+    );
     expect(publish).not.toContain("pnpm install");
     expect(publish).not.toContain("corepack");
     expect(publish).not.toContain("pnpm run");
@@ -1263,6 +1301,12 @@ describe("release package metadata", () => {
       'fs.writeFileSync(userConfig, "", { mode: 0o600 })',
     );
     expect(publish).toContain('lower.endsWith("_proxy")');
+    expect(publish).toContain(
+      'String(npmVersion.stdout || "").trim() !== "11.18.0"',
+    );
+    expect(publish).toContain("queryRegistryIntegrity");
+    expect(publish).toContain("existingIntegrity === record.integrity");
+    expect(publish).toContain("publishedIntegrity !== record.integrity");
     expect(prepare).toContain("pnpm run release:check");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).not.toContain("NODE_AUTH_TOKEN");
@@ -1326,9 +1370,83 @@ describe("release package metadata", () => {
     );
     expect(workflow).toContain("include-hidden-files: false");
     expect(workflow).toContain(".release/package-manifest.json");
-    expect(workflow).toContain(".release/pegma-mail-*.tgz");
+    expect(workflow).toContain("${{ steps.release_files.outputs.tarball }}");
+    expect(workflow).not.toContain(".release/pegma-mail-*.tgz");
     expect(workflow).toContain('createHash("sha256")');
     expect(workflow).toContain('createHash("sha512")');
+  });
+
+  it("executes the workflow-owned release validator", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-workflow-validator-test-"),
+    );
+    const releaseDirectory = join(directory, ".release");
+    try {
+      await mkdir(releaseDirectory);
+      const manifestPath = await writePreparedReleaseFixture(
+        releaseDirectory,
+        "0.1.0",
+      );
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        gitCommit: string;
+        releaseTag: string;
+        package: { sha256: string };
+      };
+      const workflow = readFileSync(
+        join(process.cwd(), ".github", "workflows", "publish.yml"),
+        "utf8",
+      );
+      const validator = join(directory, "publish-validator.cjs");
+      await writeFile(validator, `${workflowPublishValidator(workflow)}\n`);
+      const validate = () =>
+        spawnSync(process.execPath, [validator, "--validate-only"], {
+          cwd: directory,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            RELEASE_COMMIT: manifest.gitCommit,
+            RELEASE_TAG: manifest.releaseTag,
+          },
+        });
+
+      const valid = validate();
+      expect(valid.status, valid.stderr).toBe(0);
+      expect(valid.stdout).toContain("Prepared release files are valid.");
+
+      const extra = join(releaseDirectory, ".extra");
+      await writeFile(extra, "unexpected\n");
+      const unexpected = validate();
+      expect(unexpected.status).not.toBe(0);
+      expect(unexpected.stderr).toContain("expected file inventory");
+      await rm(extra);
+
+      manifest.package.sha256 = "0".repeat(64);
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      const changed = validate();
+      expect(changed.status).not.toBe(0);
+      expect(changed.stderr).toContain("digests do not match");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans once, builds once, and packs without lifecycle scripts", () => {
+    const source = readFileSync(
+      join(process.cwd(), "scripts", "release-packages.mjs"),
+      "utf8",
+    );
+    const prepare = source.slice(
+      source.indexOf("export async function prepareRelease"),
+      source.indexOf("export async function prepareBootstrap"),
+    );
+    expect(prepare.match(/cleanPackageBuildOutputs/gu)).toHaveLength(1);
+    expect(prepare.indexOf('"run", "build"')).toBeGreaterThan(
+      prepare.indexOf("cleanPackageBuildOutputs"),
+    );
+    expect(prepare.indexOf('"pack"')).toBeGreaterThan(
+      prepare.indexOf('"run", "build"'),
+    );
+    expect(prepare).toContain('"--ignore-scripts"');
   });
 
   it("installs the reviewed npm before every CI matrix gate", () => {
