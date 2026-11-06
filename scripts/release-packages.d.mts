@@ -55,6 +55,10 @@ export function validateRepository(
 ): Promise<unknown>;
 export function verifyPreparedManifest(path: string): Promise<unknown>;
 export function verifyPreparedBootstrapManifest(path: string): Promise<unknown>;
+export function verifyReleaseDirectory(
+  directory: string,
+  expectedTarball?: string,
+): Promise<{ tarball: string }>;
 export function verifyBootstrapPreparation(
   options?: ValidationOptions,
 ): Promise<unknown>;
