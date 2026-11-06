@@ -164,6 +164,7 @@ async function writePreparedReleaseFixture(directory: string, version: string) {
 }
 
 async function writeWorkflowNpmFixture(directory: string) {
+  const shimDirectory = join(directory, "shim");
   const binDirectory = join(directory, "bin");
   const npmCli =
     process.platform === "win32"
@@ -201,11 +202,17 @@ throw new Error(\`unexpected npm arguments: \${arguments_.join(" ")}\`);
 `,
   );
   if (process.platform === "win32") {
+    await mkdir(shimDirectory);
+    await writeFile(join(shimDirectory, "npm.cmd"), "@echo off\r\n");
     await writeFile(join(binDirectory, "npm.cmd"), "@echo off\r\n");
   } else {
+    await mkdir(shimDirectory);
+    const shim = join(shimDirectory, "npm");
+    await writeFile(shim, "#!/bin/sh\nexit 1\n");
+    await chmod(shim, 0o755);
     await chmod(npmCli, 0o755);
   }
-  return binDirectory;
+  return `${shimDirectory}${delimiter}${binDirectory}`;
 }
 
 async function writeReleaseRepositoryFixture(
@@ -1325,7 +1332,7 @@ describe("release package metadata", () => {
     );
     expect(publish).toContain('lower.endsWith("_proxy")');
     expect(publish).toContain(
-      'String(npmVersion.stdout || "").trim() !== "11.18.0"',
+      'String(npmVersion.stdout || "").trim() === "11.18.0"',
     );
     expect(publish).toContain("queryRegistryIntegrity");
     expect(publish).toContain("existingIntegrity === record.integrity");
@@ -1478,7 +1485,7 @@ describe("release package metadata", () => {
       );
       const validator = join(directory, "publish-validator.cjs");
       const statePath = join(directory, "npm-state.json");
-      const binDirectory = await writeWorkflowNpmFixture(directory);
+      const npmPath = await writeWorkflowNpmFixture(directory);
       await writeFile(validator, `${workflowPublishValidator(workflow)}\n`);
       const environment = Object.fromEntries(
         Object.entries(process.env).filter(
@@ -1486,7 +1493,7 @@ describe("release package metadata", () => {
         ),
       );
       environment["PATH"] =
-        `${binDirectory}${delimiter}${process.env["PATH"] ?? ""}`;
+        `${npmPath}${delimiter}${process.env["PATH"] ?? ""}`;
       environment["RELEASE_COMMIT"] = manifest.gitCommit;
       environment["RELEASE_TAG"] = manifest.releaseTag;
       environment["GITHUB_TEST_NPM_STATE"] = statePath;
