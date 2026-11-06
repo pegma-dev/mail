@@ -279,9 +279,17 @@ jobs:
             process.exit(0);
           }
 
-          const npmLookup = spawnSync("which", ["npm"], { encoding: "utf8", shell: false });
+          const npmLookup = spawnSync(
+            process.platform === "win32" ? "where.exe" : "which",
+            [process.platform === "win32" ? "npm.cmd" : "npm"],
+            { encoding: "utf8", shell: false },
+          );
           if (npmLookup.status !== 0) fail("npm is unavailable");
-          const npmCli = fs.realpathSync(npmLookup.stdout.trim().split(/\r?\n/u)[0]);
+          const npmExecutable = npmLookup.stdout.trim().split(/\r?\n/u)[0];
+          const npmCli = process.platform === "win32"
+            ? path.join(path.dirname(npmExecutable), "node_modules", "npm", "bin", "npm-cli.js")
+            : fs.realpathSync(npmExecutable);
+          if (!fs.existsSync(npmCli)) fail("npm is unavailable");
           const temporaryRoot = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), "mail-publish-"));
           try {
             const cwd = path.join(temporaryRoot, "work");

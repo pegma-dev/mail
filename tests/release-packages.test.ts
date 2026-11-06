@@ -1,9 +1,17 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   PACKAGE_FILES,
@@ -62,46 +70,8 @@ async function startTestRegistry(
   };
 }
 
-function isPnpmCli(path: string) {
-  const normalized = path.replaceAll("\\", "/").toLowerCase();
-  return (
-    normalized.includes("/pnpm/") ||
-    normalized.endsWith("/pnpm") ||
-    normalized.endsWith("/pnpm.cjs") ||
-    normalized.endsWith("/pnpm.js")
-  );
-}
-
 function reviewedNpmExecPath() {
-  const fromEnv = process.env["npm_execpath"];
-  if (fromEnv !== undefined && !isPnpmCli(fromEnv)) return fromEnv;
-  const lookup = spawnSync(
-    process.platform === "win32" ? "where.exe" : "which",
-    [process.platform === "win32" ? "npm.cmd" : "npm"],
-    { encoding: "utf8", shell: false },
-  );
-  if (lookup.status === 0) {
-    const executable = lookup.stdout.trim().split(/\r?\n/u)[0];
-    if (executable !== undefined && executable.length > 0) {
-      if (process.platform !== "win32") return realpathSync(executable);
-      const nearby = join(
-        dirname(executable),
-        "node_modules",
-        "npm",
-        "bin",
-        "npm-cli.js",
-      );
-      if (existsSync(nearby)) return nearby;
-    }
-  }
-  return join(
-    dirname(process.execPath),
-    process.platform === "win32" ? "node_modules" : "..",
-    ...(process.platform === "win32" ? [] : ["lib", "node_modules"]),
-    "npm",
-    "bin",
-    "npm-cli.js",
-  );
+  return resolveNpmCli();
 }
 
 function cleanNpmEnvironment() {
@@ -191,6 +161,51 @@ async function writePreparedReleaseFixture(directory: string, version: string) {
     }),
   );
   return manifestPath;
+}
+
+async function writeWorkflowNpmFixture(directory: string) {
+  const binDirectory = join(directory, "bin");
+  const npmCli =
+    process.platform === "win32"
+      ? join(binDirectory, "node_modules", "npm", "bin", "npm-cli.js")
+      : join(binDirectory, "npm");
+  await mkdir(dirname(npmCli), { recursive: true });
+  await writeFile(
+    npmCli,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const statePath = process.env.GITHUB_TEST_NPM_STATE;
+if (!statePath) throw new Error("test state is unavailable");
+const arguments_ = process.argv.slice(2);
+if (arguments_[0] === "--version") {
+  process.stdout.write("11.18.0\\n");
+  process.exit(0);
+}
+const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+if (arguments_[0] === "view") {
+  const response = state.views.shift();
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  if (response === "missing") {
+    process.stderr.write("npm ERR! code E404\\n");
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify(response));
+  process.exit(0);
+}
+if (arguments_[0] === "publish") {
+  state.publishCount += 1;
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  process.exit(0);
+}
+throw new Error(\`unexpected npm arguments: \${arguments_.join(" ")}\`);
+`,
+  );
+  if (process.platform === "win32") {
+    await writeFile(join(binDirectory, "npm.cmd"), "@echo off\r\n");
+  } else {
+    await chmod(npmCli, 0o755);
+  }
+  return binDirectory;
 }
 
 async function writeReleaseRepositoryFixture(
@@ -1436,6 +1451,80 @@ describe("release package metadata", () => {
       const changed = validate();
       expect(changed.status).not.toBe(0);
       expect(changed.stderr).toContain("digests do not match");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("executes the workflow-owned registry decision paths", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "pegma-mail-workflow-publish-test-"),
+    );
+    const releaseDirectory = join(directory, ".release");
+    try {
+      await mkdir(releaseDirectory);
+      const manifestPath = await writePreparedReleaseFixture(
+        releaseDirectory,
+        "0.1.0",
+      );
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        gitCommit: string;
+        releaseTag: string;
+        package: { integrity: string };
+      };
+      const workflow = readFileSync(
+        join(process.cwd(), ".github", "workflows", "publish.yml"),
+        "utf8",
+      );
+      const validator = join(directory, "publish-validator.cjs");
+      const statePath = join(directory, "npm-state.json");
+      const binDirectory = await writeWorkflowNpmFixture(directory);
+      await writeFile(validator, `${workflowPublishValidator(workflow)}\n`);
+      const environment = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => key.toLowerCase() !== "path",
+        ),
+      );
+      environment["PATH"] =
+        `${binDirectory}${delimiter}${process.env["PATH"] ?? ""}`;
+      environment["RELEASE_COMMIT"] = manifest.gitCommit;
+      environment["RELEASE_TAG"] = manifest.releaseTag;
+      environment["GITHUB_TEST_NPM_STATE"] = statePath;
+      const run = async (views: string[]) => {
+        await writeFile(statePath, JSON.stringify({ publishCount: 0, views }));
+        const result = spawnSync(process.execPath, [validator], {
+          cwd: directory,
+          encoding: "utf8",
+          env: environment,
+        });
+        const state = JSON.parse(readFileSync(statePath, "utf8")) as {
+          publishCount: number;
+          views: string[];
+        };
+        return { result, state };
+      };
+
+      const alreadyPublished = await run([manifest.package.integrity]);
+      expect(
+        alreadyPublished.result.status,
+        alreadyPublished.result.stderr,
+      ).toBe(0);
+      expect(alreadyPublished.result.stdout).toContain(
+        "The exact package version is already published.",
+      );
+      expect(alreadyPublished.state.publishCount).toBe(0);
+
+      const different = await run(["sha512-different"]);
+      expect(different.result.status).not.toBe(0);
+      expect(different.result.stderr).toContain(
+        "the registry version has different tarball integrity",
+      );
+      expect(different.state.publishCount).toBe(0);
+
+      const published = await run(["missing", manifest.package.integrity]);
+      expect(published.result.status, published.result.stderr).toBe(0);
+      expect(published.state.publishCount).toBe(1);
+      expect(published.state.views).toEqual([]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
