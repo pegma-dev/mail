@@ -161,7 +161,18 @@ export function resolveNpmCli() {
           "npm-cli.js",
         ),
   );
-  const cli = candidates.find((candidate) => existsSync(candidate));
+  const cli = [...new Set(candidates)]
+    .filter((candidate) => existsSync(candidate))
+    .find((candidate) => {
+      const version = spawnSync(process.execPath, [candidate, "--version"], {
+        encoding: "utf8",
+        env: isolatedNpmEnvironment(),
+        shell: false,
+      });
+      return (
+        version.status === 0 && version.stdout.trim() === REVIEWED_NPM_VERSION
+      );
+    });
   if (cli === undefined) fail("could not resolve the npm CLI");
   return cli;
 }

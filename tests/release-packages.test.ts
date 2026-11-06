@@ -452,7 +452,15 @@ describe("release package metadata", () => {
     const original = process.env["npm_execpath"];
     try {
       process.env["npm_execpath"] = join(tmpdir(), "pnpm", "pnpm.cjs");
-      expect(resolveNpmCli()).toBe(reviewedNpmExecPath());
+      const version = spawnSync(
+        process.execPath,
+        [resolveNpmCli(), "--version"],
+        {
+          encoding: "utf8",
+        },
+      );
+      expect(version.status).toBe(0);
+      expect(version.stdout.trim()).toBe("11.18.0");
     } finally {
       if (original === undefined) delete process.env["npm_execpath"];
       else process.env["npm_execpath"] = original;
@@ -1306,7 +1314,10 @@ describe("release package metadata", () => {
     );
     expect(publish).toContain("queryRegistryIntegrity");
     expect(publish).toContain("existingIntegrity === record.integrity");
-    expect(publish).toContain("publishedIntegrity !== record.integrity");
+    expect(publish).toContain("publishedIntegrity === record.integrity");
+    expect(publish).toContain(
+      "postPublishDelays = [0, 1000, 2000, 4000, 8000]",
+    );
     expect(prepare).toContain("pnpm run release:check");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).not.toContain("NODE_AUTH_TOKEN");

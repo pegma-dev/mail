@@ -343,9 +343,33 @@ jobs:
                 "--globalconfig", globalConfig], { cwd, env: environment, stdio: "inherit", shell: false });
               if (result.error) throw result.error;
               if (result.status !== 0) fail(`npm publish exited with ${String(result.status)}`);
-              const publishedIntegrity = queryRegistryIntegrity();
-              if (publishedIntegrity !== record.integrity) {
-                fail("the registry did not return the prepared tarball integrity");
+              const postPublishDelays = [0, 1000, 2000, 4000, 8000];
+              let lastRegistryError = null;
+              let confirmed = false;
+              for (const delay of postPublishDelays) {
+                if (delay > 0) {
+                  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+                }
+                try {
+                  const publishedIntegrity = queryRegistryIntegrity();
+                  if (publishedIntegrity === record.integrity) {
+                    confirmed = true;
+                    break;
+                  }
+                  lastRegistryError = new Error(
+                    publishedIntegrity === null
+                      ? "the registry has not returned the package version"
+                      : "the registry returned different tarball integrity",
+                  );
+                } catch (error) {
+                  lastRegistryError = error;
+                }
+              }
+              if (!confirmed) {
+                const detail = lastRegistryError instanceof Error
+                  ? `: ${lastRegistryError.message}`
+                  : "";
+                fail(`the registry did not return the prepared tarball integrity${detail}`);
               }
             }
           } finally {
