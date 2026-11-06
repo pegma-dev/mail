@@ -1459,7 +1459,7 @@ describe("release package metadata", () => {
     expect(workflow).toContain("run: corepack enable");
     expect(workflow).toContain("run: pnpm run release:check");
     const installNpm = workflow.indexOf(
-      "run: npm install --global npm@11.18.0",
+      "run: npm install --global npm@11.18.0 --ignore-scripts --registry https://registry.npmjs.org/",
     );
     const installDependencies = workflow.indexOf(
       "run: pnpm install --frozen-lockfile",

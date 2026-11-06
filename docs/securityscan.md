@@ -29,10 +29,10 @@ evidence, exploitability assessment, and file references.
 - **[OK] `.github/workflows/*.yml`** — reviewed. All actions pinned by full
   commit SHA, least-privilege `permissions`
   (`contents: read`, with `id-token: write` only in the publish job), no
-  `pull_request_target`, no script injection from event context (release tag
-  used only as a `ref` string and in artifact names, not interpolated into
-  shell), protected-environment gate (`environment: npm-publish`). No findings
-  yet.
+  `pull_request_target`; release values pass through scoped environment
+  variables and canonical validation before quoted refspec use; prepared files
+  are checked by workflow-owned logic covered by executable tests; and the
+  protected-environment gate is `environment: npm-publish`. No findings yet.
 - **[OK] `test/azurite.ts`** — reviewed. Local emulator harness; binds to
   127.0.0.1, spawns node with fixed args, no secrets. No findings.
 
